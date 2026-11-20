@@ -10,5 +10,7 @@ dev = ["bevy/dynamic_linking"]
 [dependencies]
 sim_core = { path = "../sim_core" }
 world_gen = { path = "../world_gen" }
-bevy = "0.18"
+# 音效在内存中合成为 WAV，bevy 默认只带 vorbis 解码器，必须显式启用 wav，否则 Windows 下
+# 音频解码线程会 panic: UnrecognizedFormat
+bevy = { version = "0.18", features = ["wav"] }
 glam = { workspace = true }
