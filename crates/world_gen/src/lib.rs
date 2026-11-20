@@ -138,7 +138,10 @@ impl World {
     pub fn color_at(&self, x: f64, z: f64, day_of_year: f64) -> [f32; 3] {
         let b = self.biome(x, z, day_of_year);
         let mut c = climate::biome_color(b);
-        let n = noise::noise3(fold(self.seed), x / 220.0, 0.5, z / 220.0) as f32 * 0.07;
+        // 使用球面点采样噪声：经度方向天然无缝（避免 ±180° 接缝处颜色跳变）。
+        let k = WORLD_WIDTH / std::f64::consts::TAU / 220.0;
+        let sp = world_to_sphere(x, z) * k;
+        let n = noise::noise3(fold(self.seed), sp.x, sp.y, sp.z) as f32 * 0.07;
         for v in &mut c {
             *v = (*v + n).clamp(0.0, 1.0);
         }
