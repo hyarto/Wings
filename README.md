@@ -8,7 +8,7 @@
 ## 下载
 
 预编译版本见 [Releases](https://github.com/hyarto/Wings/releases)：
-[Windows x86_64 (`v0.1.0-windows`)](https://github.com/hyarto/Wings/releases/tag/v0.1.0-windows) ·
+[Windows x86_64 (`v0.2.0-windows`，含指示灯/地形告警/地形雷达)](https://github.com/hyarto/Wings/releases/tag/v0.2.0-windows)（旧版 [v0.1.0](https://github.com/hyarto/Wings/releases/tag/v0.1.0-windows)） ·
 [Linux x86_64 (`v0.1.0-linux`)](https://github.com/hyarto/Wings/releases/tag/v0.1.0-linux)
 
 Android：移植可行性评估 [docs/ANDROID_PORT_ASSESSMENT.md](docs/ANDROID_PORT_ASSESSMENT.md) · **移植实现与构建说明 [docs/ANDROID_PORT.md](docs/ANDROID_PORT.md)**（arm64-v8a APK 见 Releases `v0.1.0-android`，构建：`android/build.sh`）
