@@ -23,6 +23,8 @@ pub mod noise;
 pub mod propulsion;
 pub mod state;
 pub mod structure;
+pub mod taws;
+pub mod terrain_map;
 pub mod weather;
 
 /// 固定物理步长（120 Hz）。
