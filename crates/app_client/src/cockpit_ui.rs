@@ -269,7 +269,7 @@ pub fn draw_attitude(buf: &mut PixelBuffer, cx: i32, cy: i32, pitch: f64, roll: 
         }
     }
     // 俯仰刻度（每 10°）
-    for k in [-20, -10, 10, 20] {
+    for k in [-20i32, -10, 10, 20] {
         let off = (k as f64 - pitch) * -ppd; // 屏幕 y（下为正）：+俯仰在地平线上方
         let (hx, hy) = (-sr * off, cr * off);
         let half = if k.abs() == 10 { 5.0 } else { 8.0 };
@@ -484,7 +484,7 @@ fn draw_hud(buf: &mut PixelBuffer, h: &FlightHud, c: Rgba) {
     // 俯仰梯：3.2 px/度（垂直视场 50°），随滚转旋转
     let ppd = 3.2;
     let (sr, cr) = (h.roll.to_radians().sin(), h.roll.to_radians().cos());
-    for k in (-30..=30).step_by(5) {
+    for k in (-30i32..=30).step_by(5) {
         if k == 0 {
             continue;
         }

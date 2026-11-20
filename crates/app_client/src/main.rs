@@ -44,10 +44,6 @@ pub struct WorldGround {
 }
 
 impl Ground for WorldGround {
-    fn height(&self, x: f64, z: f64) -> f64 {
-        self.world.height(x, z).max(0.0)
-    }
-
     fn sample(&self, x: f64, z: f64) -> GroundSample {
         let h = self.world.height(x, z);
         if h <= 0.0 {

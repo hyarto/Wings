@@ -3,6 +3,12 @@ name = "app_client"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# 开发期动态链接加速编译：cargo run -p app_client --features dev
+dev = ["bevy/dynamic_linking"]
+
 [dependencies]
 sim_core = { path = "../sim_core" }
 world_gen = { path = "../world_gen" }
+bevy = "0.18"
+glam = { workspace = true }

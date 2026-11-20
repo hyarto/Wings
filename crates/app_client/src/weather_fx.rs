@@ -166,8 +166,8 @@ fn manage_clouds(mut commands: Commands, game: Res<GameState>, assets: Option<Re
                     continue;
                 }
                 let seed = (key.1.wrapping_mul(73856093) ^ key.2.wrapping_mul(19349663) ^ key.0.wrapping_mul(83492791)) as u32;
-                let jx = (rnd(seed) - 0.5) * cs * 0.7;
-                let jz = (rnd(seed ^ 0x55) - 0.5) * cs * 0.7;
+                let jx = (rnd(seed) as f64 - 0.5) * cs * 0.7;
+                let jz = (rnd(seed ^ 0x55) as f64 - 0.5) * cs * 0.7;
                 let pos = DVec3::new((key.1 as f64 + 0.5) * cs + jx as f64, mid, (key.2 as f64 + 0.5) * cs + jz as f64);
                 if game.sim.weather.cloud_density(bevy_to_glam(pos)) < 0.25 {
                     continue;

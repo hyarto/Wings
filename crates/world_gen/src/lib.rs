@@ -49,6 +49,28 @@ impl World {
             .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
     }
 
+    /// 若 (x, z) 处于某机场的跑道影响范围内（压平胶囊 + 混合带内），返回该机场。
+    /// 供地面表面类型（沥青/土路）与客户端快速判定使用。
+    pub fn airport_near(&self, x: f64, z: f64) -> Option<&Airport> {
+        let (ci, cj) = airport::cell_of(x, z);
+        for dj in -1..=1 {
+            let j = cj + dj;
+            if !(0..GRID_NZ).contains(&j) {
+                continue;
+            }
+            for di in -1..=1 {
+                let i = (ci + di).rem_euclid(GRID_NX);
+                if let Some(idx) = self.grid[(j * GRID_NX + i) as usize] {
+                    let ap = &self.airports[idx];
+                    if ap.capsule_sdf(x, z) < ap.blend_width {
+                        return Some(ap);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// 压平：对 (x,z) 周围 3×3 网格内的机场应用胶囊 SDF 混合。
     pub(crate) fn flatten(&self, x: f64, z: f64, base: f64) -> f64 {
         let (ci, cj) = airport::cell_of(x, z);
