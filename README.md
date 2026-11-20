@@ -5,6 +5,14 @@
 
 ![cockpit](docs/screenshot_cockpit.png)
 
+## 下载
+
+预编译版本见 [Releases](https://github.com/hyarto/Wings/releases)：
+[Windows x86_64 (`v0.1.0-windows`)](https://github.com/hyarto/Wings/releases/tag/v0.1.0-windows) ·
+[Linux x86_64 (`v0.1.0-linux`)](https://github.com/hyarto/Wings/releases/tag/v0.1.0-linux)
+
+Android 移植可行性评估（已用 NDK 实际交叉编译验证）：[docs/ANDROID_PORT_ASSESSMENT.md](docs/ANDROID_PORT_ASSESSMENT.md)
+
 ## 运行
 
 ```bash
