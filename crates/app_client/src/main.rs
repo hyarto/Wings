@@ -15,6 +15,9 @@ mod pixel_pipeline;
 mod terrain_mesh;
 mod weather_fx;
 
+#[cfg(test)]
+mod headless_tests;
+
 use bevy::camera::{Camera, Viewport};
 use bevy::math::DVec3;
 use bevy::prelude::*;
