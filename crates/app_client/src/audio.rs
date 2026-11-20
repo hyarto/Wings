@@ -116,6 +116,31 @@ pub fn synth_stall_horn() -> Vec<f32> {
         .collect()
 }
 
+/// 地形警戒：两声 800 Hz 短鸣（1.2 s 循环）。
+pub fn synth_terrain_caution() -> Vec<f32> {
+    (0..(RATE * 6 / 5))
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let gate = if t < 0.18 || (0.30..0.48).contains(&t) { 1.0 } else { 0.0 };
+            (TAU * 800.0 * t).sin() * gate * 0.5
+        })
+        .collect()
+}
+
+/// 地形警告（PULL UP）：500↔1100 Hz 扫频警笛（0.5 s 周期）。
+pub fn synth_terrain_warning() -> Vec<f32> {
+    let mut phase = 0.0f32;
+    (0..RATE)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let sweep = (t * 2.0).fract();
+            let f = 500.0 + 600.0 * (1.0 - (sweep * 2.0 - 1.0).abs());
+            phase += TAU * f / RATE as f32;
+            phase.sin() * 0.55
+        })
+        .collect()
+}
+
 pub fn synth_thump() -> Vec<f32> {
     let mut n = Lcg(5);
     (0..(RATE / 2))
@@ -131,6 +156,8 @@ pub enum Sound {
     Engine,
     Wind,
     Stall,
+    TerrainCaution,
+    TerrainWarning,
 }
 
 #[derive(Resource)]
@@ -148,14 +175,25 @@ fn setup_audio(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>,
     let wind = add(synth_wind());
     let stall = add(synth_stall_horn());
     let thump = add(synth_thump());
+    let tcaution = add(synth_terrain_caution());
+    let twarn = add(synth_terrain_warning());
     let quiet = PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0));
     commands.spawn((AudioPlayer::new(engine), quiet, Sound::Engine));
     commands.spawn((AudioPlayer::new(wind), quiet, Sound::Wind));
     commands.spawn((AudioPlayer::new(stall), quiet, Sound::Stall));
+    commands.spawn((AudioPlayer::new(tcaution), quiet, Sound::TerrainCaution));
+    commands.spawn((AudioPlayer::new(twarn), quiet, Sound::TerrainWarning));
     commands.insert_resource(SoundBank { thump });
 }
 
-fn update_audio(mut commands: Commands, game: Res<GameState>, bank: Option<Res<SoundBank>>, mut q: Query<(&mut AudioSink, &Sound)>) {
+fn update_audio(
+    mut commands: Commands,
+    game: Res<GameState>,
+    bank: Option<Res<SoundBank>>,
+    radar: Option<Res<crate::terrain_radar::TerrainRadar>>,
+    mut q: Query<(&mut AudioSink, &Sound)>,
+) {
+    let taws = radar.map_or(sim_core::taws::TawsAlert::None, |r| r.alert);
     let active = game.screen == crate::Screen::Flight && !game.paused && !game.sim.state.damage.crashed;
     let d = &game.sim.diag;
     let e = game.sim.state.engines.first().copied().unwrap_or_default();
@@ -181,6 +219,14 @@ fn update_audio(mut commands: Commands, game: Res<GameState>, bank: Option<Res<S
                 let on = active && d.stall_warning;
                 sink.set_volume(Volume::Linear(if on { 0.45 } else { 0.0 }));
             }
+            Sound::TerrainCaution => {
+                let on = active && taws.level() == 1;
+                sink.set_volume(Volume::Linear(if on { 0.4 } else { 0.0 }));
+            }
+            Sound::TerrainWarning => {
+                let on = active && taws.level() == 2;
+                sink.set_volume(Volume::Linear(if on { 0.55 } else { 0.0 }));
+            }
         }
     }
     if let (Some(td), Some(bank)) = (d.touchdown, bank) {
@@ -200,7 +246,7 @@ mod tests {
     use super::*;
     #[test]
     fn synthesized_audio_is_valid_wav_and_bounded() {
-        for s in [synth_piston(), synth_turboprop(), synth_turbofan(), synth_wind(), synth_stall_horn(), synth_thump()] {
+        for s in [synth_piston(), synth_turboprop(), synth_turbofan(), synth_wind(), synth_stall_horn(), synth_thump(), synth_terrain_caution(), synth_terrain_warning()] {
             assert!(!s.is_empty());
             let w = wav_bytes(&s);
             assert_eq!(&w[0..4], b"RIFF");
@@ -215,7 +261,7 @@ mod tests {
     fn synthesized_audio_is_decodable_by_bevy_audio() {
         use bevy::audio::Decodable;
         use bevy::audio::Source;
-        for s in [synth_piston(), synth_turboprop(), synth_turbofan(), synth_wind(), synth_stall_horn(), synth_thump()] {
+        for s in [synth_piston(), synth_turboprop(), synth_turbofan(), synth_wind(), synth_stall_horn(), synth_thump(), synth_terrain_caution(), synth_terrain_warning()] {
             let src = AudioSource { bytes: wav_bytes(&s).into() };
             let dec = src.decoder();
             assert_eq!(dec.channels(), 1);

@@ -2,7 +2,7 @@
 //!
 //! 键盘：W/S 或 ↑/↓ 俯仰（S/↓ 拉杆）、A/D 或 ←/→ 滚转、Q/E 方向舵、Shift/Ctrl 油门↑↓（Z 全油门 X 慢车）、
 //! F/V 襟翼放/收、G 起落架、Space 刹车、B 驻车刹车、T/Y 配平、H 皮托加温、I 除冰、J 减速板、K 反推、
-//! 1-4 视角（驾驶舱/HUD/追尾/掠过）、M 航图、Tab 开始菜单、R 黑匣子回放（←/→ 快退/快进，F5 导出 CSV）、F9 失效一台发动机、F10 顺桨、C 切换天气、P 暂停、Backspace 重置。
+//! N 地形雷达图（关/小/大）、[ ] 雷达量程、1-4 视角（驾驶舱/HUD/追尾/掠过）、M 航图、Tab 开始菜单、R 黑匣子回放（←/→ 快退/快进，F5 导出 CSV）、F9 失效一台发动机、F10 顺桨、C 切换天气、P 暂停、Backspace 重置。
 
 use crate::cockpit_ui::ViewMode;
 use crate::{GameState, Screen};
@@ -135,6 +135,8 @@ pub fn read_input(
     if keys.just_pressed(KeyCode::KeyX) {
         game.sim.controls.throttle = 0.0;
     }
+    let (has_pitot_heat, has_deice) = (game.sim.config.has_pitot_heat, game.sim.config.has_deice);
+    let engine_running = game.sim.state.engines.iter().any(|e| e.running);
     let c = &mut game.sim.controls;
     c.pitch = pitch.clamp(-1.0, 1.0);
     c.roll = roll.clamp(-1.0, 1.0);
@@ -155,14 +157,34 @@ pub fn read_input(
     }
     let trim = (keys.pressed(KeyCode::KeyT) as i32 - keys.pressed(KeyCode::KeyY) as i32) as f64;
     c.pitch_trim = (c.pitch_trim + trim * 0.25 * dt).clamp(-1.0, 1.0);
+    let mut toast: Option<String> = None;
     if keys.just_pressed(KeyCode::KeyH) {
         c.pitot_heat = !c.pitot_heat;
+        toast = Some(if !has_pitot_heat {
+            "NO PITOT HEAT FITTED".to_string()
+        } else if c.pitot_heat {
+            "PITOT HEAT ON".to_string()
+        } else {
+            "PITOT HEAT OFF".to_string()
+        });
     }
     if keys.just_pressed(KeyCode::KeyI) {
         c.deice = !c.deice;
+        toast = Some(if !has_deice {
+            "NO DE-ICE SYSTEM ON THIS AIRCRAFT".to_string()
+        } else if !c.deice {
+            "DE-ICE OFF".to_string()
+        } else if !engine_running {
+            "DE-ICE ON - NO ENGINE POWER".to_string()
+        } else {
+            "DE-ICE ON".to_string()
+        });
     }
     c.speedbrake = if keys.pressed(KeyCode::KeyJ) { 1.0 } else { 0.0 };
     c.reverse = keys.pressed(KeyCode::KeyK);
+    if let Some(t) = toast {
+        game.toast = Some((t, 2.0));
+    }
 
     for (k, v) in [(KeyCode::Digit1, ViewMode::Cockpit), (KeyCode::Digit2, ViewMode::Hud), (KeyCode::Digit3, ViewMode::Chase), (KeyCode::Digit4, ViewMode::Flyby)] {
         if keys.just_pressed(k) {

@@ -521,11 +521,12 @@ impl Simulation {
 }
 
 /// 防/除冰类系统的面板状态（供指示灯使用）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SystemState {
     /// 该机型没有这套系统（开关无效）。
     NotFitted,
     /// 已装备，开关在关位。
+    #[default]
     Off,
     /// 开关在开位且系统正在工作。
     On,

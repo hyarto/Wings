@@ -1,6 +1,8 @@
 //! 320×160 原生像素缓冲仪表盘 + 4×6 点阵字体 + HUD 模式 + 复古航图。
 //! 全部为纯 CPU 绘制函数（不依赖 Bevy），可直接单元测试。
 
+use sim_core::integrator::SystemState;
+use sim_core::taws::TawsAlert;
 use crate::pixel_pipeline::{COCKPIT_VIEW_H, H, W};
 
 pub type Rgba = [u8; 4];
@@ -243,13 +245,98 @@ pub struct FlightHud {
     pub time: f64,
     pub code: String,
     pub engine_label: &'static str,
+    /// 皮托管加热 / 机体除冰的面板状态。
+    pub pitot: SystemState,
+    pub deice: SystemState,
+    /// 皮托管被冰堵塞（空速表冻结）。
+    pub pitot_blocked: bool,
+    /// 当前处于结冰条件（云/降水中且温度在结冰窗口内）。
+    pub icing_cond: bool,
+    /// 地形告警（经保持逻辑后的当前告警）。
+    pub taws: TawsAlert,
+    /// 短暂提示（开关切换、系统不可用等）。
+    pub toast: Option<String>,
 }
 
-fn lamp(buf: &mut PixelBuffer, x: i32, y: i32, label: &str, on: bool, color: Rgba, blink: bool, t: f64) {
-    let lit = on && (!blink || (t * 4.0) as i64 % 2 == 0);
-    let bg = if lit { color } else { PANEL_DK };
-    buf.rect(x, y, label.len() as i32 * 5 + 1, 8, bg);
-    buf.text(x + 1, y + 1, label, if lit { BLACK } else { [70, 70, 78, 255] }, 1);
+/// 指示灯状态。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Lamp {
+    /// 该系统本机型没有装备：灰色并划掉。
+    Dim,
+    Off,
+    On(Rgba),
+    Blink(Rgba),
+}
+
+fn lamp(buf: &mut PixelBuffer, x: i32, y: i32, label: &str, state: Lamp, t: f64) -> i32 {
+    let w = label.len() as i32 * 5 + 1;
+    let lit_color = match state {
+        Lamp::On(c) => Some(c),
+        Lamp::Blink(c) if (t * 4.0) as i64 % 2 == 0 => Some(c),
+        _ => None,
+    };
+    match lit_color {
+        Some(c) => {
+            buf.rect(x, y, w, 8, c);
+            buf.text(x + 1, y + 1, label, BLACK, 1);
+        }
+        None => {
+            buf.rect(x, y, w, 8, [14, 14, 20, 175]);
+            let tc = if state == Lamp::Dim { [64, 64, 72, 255] } else { [105, 105, 116, 255] };
+            buf.text(x + 1, y + 1, label, tc, 1);
+            if state == Lamp::Dim {
+                buf.rect(x, y + 4, w, 1, [150, 150, 160, 255]);
+            }
+        }
+    }
+    w
+}
+
+/// 各指示灯当前状态（顺序即显示顺序）。
+pub fn annunciators(h: &FlightHud) -> Vec<(&'static str, Lamp)> {
+    let blink_if = |on: bool, c: Rgba| if on { Lamp::Blink(c) } else { Lamp::Off };
+    let terr = match h.taws.level() {
+        2 => Lamp::Blink(RED),
+        1 => Lamp::Blink(AMBER),
+        _ => Lamp::Off,
+    };
+    let ice = if h.ice > 0.4 {
+        Lamp::Blink(AMBER)
+    } else if h.ice > 0.02 || h.icing_cond {
+        Lamp::On(AMBER)
+    } else {
+        Lamp::Off
+    };
+    let pitot = match h.pitot {
+        _ if h.pitot_blocked => Lamp::Blink(RED),
+        SystemState::NotFitted => Lamp::Dim,
+        SystemState::On | SystemState::NoPower => Lamp::On(GREEN),
+        SystemState::Off => blink_if(h.icing_cond, AMBER),
+    };
+    let deice = match h.deice {
+        SystemState::NotFitted => Lamp::Dim,
+        SystemState::On => Lamp::On(GREEN),
+        SystemState::NoPower => Lamp::Blink(AMBER),
+        SystemState::Off => blink_if(h.ice > 0.05, AMBER),
+    };
+    vec![
+        ("STALL", blink_if(h.stall, RED)),
+        ("OVSPD", blink_if(h.ovspd, RED)),
+        ("G-LIM", blink_if(h.glim, RED)),
+        ("GEAR", blink_if(h.gear_warn, RED)),
+        ("TERR", terr),
+        ("ICE", ice),
+        ("PITOT", pitot),
+        ("DEICE", deice),
+    ]
+}
+
+/// 指示灯条（水平一排）。
+pub fn draw_annunciators(buf: &mut PixelBuffer, h: &FlightHud, y: i32) {
+    let mut x = 6;
+    for (label, st) in annunciators(h) {
+        x += lamp(buf, x, y, label, st, h.time) + 3;
+    }
 }
 
 /// 地平仪：边长 36 的圆形仪表。
@@ -379,11 +466,11 @@ fn draw_panel(buf: &mut PixelBuffer, h: &FlightHud) {
     // 中左：表速 IAS（2× 大字）、AoA、G 条
     buf.rect(64, y0 + 3, 70, 42, PANEL_DK);
     buf.frame(64, y0 + 3, 70, 42, GRAY);
-    buf.text(67, y0 + 6, "IAS KT", GRAY, 1);
+    buf.text(67, y0 + 6, if h.pitot_blocked { "IAS FZ" } else { "IAS KT" }, if h.pitot_blocked { RED } else { GRAY }, 1);
     if h.ias_failed {
         buf.text(70, y0 + 14, "FAIL", RED, 2);
     } else {
-        buf.text(70, y0 + 14, &format!("{:3.0}", h.ias_kt), WHITE, 2);
+        buf.text(70, y0 + 14, &format!("{:3.0}", h.ias_kt), if h.pitot_blocked { AMBER } else { WHITE }, 2);
     }
     buf.text(102, y0 + 6, &format!("GS{:3.0}", h.gs_kt), GRAY, 1);
     buf.text(67, y0 + 30, &format!("AOA{:5.1}", h.aoa), if h.stall { RED } else { WHITE }, 1);
@@ -419,12 +506,6 @@ fn draw_panel(buf: &mut PixelBuffer, h: &FlightHud) {
             buf.text(256, y0 + 24, &h.nav_text, GRAY, 1);
         }
     }
-    let t = h.time;
-    lamp(buf, 290, y0 + 31, "STALL", h.stall, RED, true, t);
-    lamp(buf, 256, y0 + 33, "ICE", h.ice > 0.02, AMBER, h.ice > 0.4, t);
-    lamp(buf, 276 - 4, y0 + 33, "OVSPD", h.ovspd, RED, true, t);
-    lamp(buf, 256, y0 + 41, "G-LIM", h.glim, RED, true, t);
-    lamp(buf, 290, y0 + 40, "GEAR", h.gear_warn, RED, true, t);
 }
 
 /// 窗外画面叠加：风挡框、机鼻、结霜、雨线（驾驶舱视角）。
@@ -549,17 +630,23 @@ fn draw_hud(buf: &mut PixelBuffer, h: &FlightHud, c: Rgba) {
     }
 }
 
-fn draw_alerts(buf: &mut PixelBuffer, h: &FlightHud, y: i32) {
+pub fn draw_alerts(buf: &mut PixelBuffer, h: &FlightHud, y: i32) {
     let blink = (h.time * 3.0) as i64 % 2 == 0;
     let mut msg: Option<(&str, Rgba)> = None;
     if h.damage.as_deref() == Some("CRASH") {
         msg = Some(("CRASH", RED));
+    } else if h.taws == TawsAlert::PullUp {
+        if (h.time * 5.0) as i64 % 2 == 0 {
+            msg = Some(("PULL UP", RED));
+        }
     } else if h.stall && blink {
         msg = Some(("STALL", RED));
     } else if h.ovspd && blink {
         msg = Some(("OVERSPEED", RED));
     } else if h.glim && blink {
         msg = Some(("G LIMIT", RED));
+    } else if h.taws.level() == 1 && blink {
+        msg = Some((h.taws.text(), AMBER));
     } else if h.gear_warn && blink {
         msg = Some(("GEAR", AMBER));
     }
@@ -580,10 +667,12 @@ pub fn draw_flight(buf: &mut PixelBuffer, h: &FlightHud, view: ViewMode) {
         ViewMode::Cockpit => {
             draw_windshield(buf, h);
             draw_panel(buf, h);
+            draw_annunciators(buf, h, 5);
             draw_alerts(buf, h, 30);
         }
         ViewMode::Hud => {
             draw_hud(buf, h, GREEN);
+            draw_annunciators(buf, h, 136);
             draw_alerts(buf, h, 30);
             if h.frost > 0.2 {
                 draw_windshield_frost_only(buf, h);
@@ -594,10 +683,21 @@ pub fn draw_flight(buf: &mut PixelBuffer, h: &FlightHud, view: ViewMode) {
             buf.text(4, 4, c, WHITE, 1);
             buf.text(4, 12, &format!("IAS {:3.0} ALT {:5.0}", h.ias_kt, h.alt_ft), WHITE, 1);
             buf.text(4, 20, &format!("HDG {:03.0} VS {:+.0}", h.heading, h.vs_fpm), WHITE, 1);
+            draw_annunciators(buf, h, 148);
             draw_alerts(buf, h, 30);
         }
     }
     buf.text(W as i32 - 4 - PixelBuffer::text_width(&h.code, 1), 4, &h.code, GRAY, 1);
+    draw_toast(buf, h);
+}
+
+/// 短暂提示（屏幕中部偏下，黑底）。
+pub fn draw_toast(buf: &mut PixelBuffer, h: &FlightHud) {
+    if let Some(t) = &h.toast {
+        let w = PixelBuffer::text_width(t, 1);
+        buf.rect(160 - w / 2 - 3, 56, w + 6, 10, [0, 0, 0, 215]);
+        buf.text_center(160, 58, t, WHITE, 1);
+    }
 }
 
 fn draw_windshield_frost_only(buf: &mut PixelBuffer, h: &FlightHud) {

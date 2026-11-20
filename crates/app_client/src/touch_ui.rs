@@ -112,6 +112,8 @@ const BTNS: &[Spec] = &[
     b("FULL",  Tap(K::KeyZ),       C_PANEL, TL,   6.0,168.0, 46.0, 34.0),
     b("IDLE",  Tap(K::KeyX),       C_PANEL, TL,  58.0,168.0, 46.0, 34.0),
     b("CSV",   Tap(K::F5),         C_PANEL, TL, 110.0,168.0, 46.0, 34.0),
+    b("TERR",  Tap(K::KeyN),       C_PANEL, TL, 162.0,168.0, 46.0, 34.0),
+    b("RANGE", Tap(K::BracketRight), C_PANEL, TL, 214.0,168.0, 46.0, 34.0),
     // ---- 黑匣子回放
     b("EXIT",  Tap(K::KeyR),       C_REPLAY, TL,   6.0, 6.0, 46.0, 34.0),
     b("<<5S",  Tap(K::ArrowLeft),  C_REPLAY, TL,  58.0, 6.0, 46.0, 34.0),

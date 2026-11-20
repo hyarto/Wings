@@ -14,6 +14,7 @@ mod mesh_util;
 mod origin;
 mod pixel_pipeline;
 mod terrain_mesh;
+mod terrain_radar;
 mod touch_ui;
 mod weather_fx;
 
@@ -21,6 +22,8 @@ mod weather_fx;
 mod headless_tests;
 #[cfg(test)]
 mod m4_tests;
+#[cfg(test)]
+mod m5_tests;
 
 use bevy::camera::{Camera, Viewport};
 use bevy::math::DVec3;
@@ -114,6 +117,8 @@ pub struct GameState {
     pub world_epoch: u32,
     pub blackbox: BlackBox,
     pub replay: Option<Replay>,
+    /// 短暂屏幕提示（文本, 剩余秒数）。
+    pub toast: Option<(String, f64)>,
 }
 
 impl GameState {
@@ -155,6 +160,7 @@ impl GameState {
             world_epoch: 0,
             blackbox: BlackBox::default(),
             replay: None,
+            toast: None,
         };
         g.depart(idx);
         g
@@ -294,6 +300,12 @@ impl GameState {
 }
 
 fn step_sim(mut game: ResMut<GameState>, time: Res<Time>) {
+    if let Some((_, left)) = game.toast.as_mut() {
+        *left -= time.delta_secs_f64();
+        if *left <= 0.0 {
+            game.toast = None;
+        }
+    }
     if game.screen == Screen::Flight && !game.paused {
         let dt = time.delta_secs_f64().min(0.1);
         if game.replay.is_some() {
@@ -372,7 +384,7 @@ fn camera_system(
     }
 }
 
-fn hud_system(game: Res<GameState>, mut hud: ResMut<HudBuffer>) {
+fn hud_system(game: Res<GameState>, mut hud: ResMut<HudBuffer>, radar: Option<Res<terrain_radar::TerrainRadar>>) {
     let s = &game.sim;
     let d = &s.diag;
     let st = &s.state;
@@ -465,8 +477,32 @@ fn hud_system(game: Res<GameState>, mut hud: ResMut<HudBuffer>) {
         time: game.time,
         code: s.config.code.to_string(),
         engine_label,
+        pitot: s.pitot_heat_state(),
+        deice: s.deice_state(),
+        pitot_blocked: st.pitot_blocked,
+        icing_cond: d.icing_intensity > 0.0,
+        taws: radar.as_ref().map_or(Default::default(), |r| r.alert),
+        toast: game.toast.as_ref().map(|t| t.0.clone()),
     };
     cockpit_ui::draw_flight(&mut hud.0, &h, game.view);
+    // 地形雷达图叠加在画面之上；告警文字与提示再画一遍，保证不被雷达图遮住
+    if let Some(radar) = radar {
+        if radar.visible() {
+            let v = terrain_radar::RadarView {
+                x: r.pos.x,
+                z: r.pos.z,
+                heading: d.heading,
+                alt: r.pos.y,
+                vs: d.vertical_speed,
+                gs: d.ground_speed,
+                agl_ft: h.agl_ft,
+                time: game.time,
+            };
+            terrain_radar::draw_radar(&mut hud.0, &radar, &v);
+            cockpit_ui::draw_alerts(&mut hud.0, &h, 30);
+            cockpit_ui::draw_toast(&mut hud.0, &h);
+        }
+    }
 }
 
 #[bevy::prelude::bevy_main]
@@ -507,10 +543,11 @@ pub fn main() {
             touch_ui::TouchUiPlugin,
         ))
         .insert_resource(game)
+        .init_resource::<terrain_radar::TerrainRadar>()
         .insert_resource(HudBuffer(PixelBuffer::new()))
         .add_systems(
             Update,
-            (input::read_input, step_sim, update_origin, sync_anchors, camera_system, hud_system.run_if(|g: Res<GameState>| g.screen == Screen::Flight)).chain(),
+            (input::read_input, terrain_radar::radar_keys, step_sim, terrain_radar::terrain_system, update_origin, sync_anchors, camera_system, hud_system.run_if(|g: Res<GameState>| g.screen == Screen::Flight)).chain(),
         )
         .run();
     let _ = (H, W);
