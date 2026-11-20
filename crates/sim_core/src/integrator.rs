@@ -519,3 +519,42 @@ impl Simulation {
         let _ = tas;
     }
 }
+
+/// 防/除冰类系统的面板状态（供指示灯使用）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SystemState {
+    /// 该机型没有这套系统（开关无效）。
+    NotFitted,
+    /// 已装备，开关在关位。
+    Off,
+    /// 开关在开位且系统正在工作。
+    On,
+    /// 开关在开位，但没有动力（发动机未运转），实际不起作用。
+    NoPower,
+}
+
+impl Simulation {
+    /// 皮托管加热状态。
+    pub fn pitot_heat_state(&self) -> SystemState {
+        if !self.config.has_pitot_heat {
+            SystemState::NotFitted
+        } else if self.controls.pitot_heat {
+            SystemState::On
+        } else {
+            SystemState::Off
+        }
+    }
+
+    /// 机体除冰状态：需要机型配备，并且至少一台发动机在运转（引气/发电）。
+    pub fn deice_state(&self) -> SystemState {
+        if !self.config.has_deice {
+            SystemState::NotFitted
+        } else if !self.controls.deice {
+            SystemState::Off
+        } else if self.state.engines.iter().any(|e| e.running) {
+            SystemState::On
+        } else {
+            SystemState::NoPower
+        }
+    }
+}
