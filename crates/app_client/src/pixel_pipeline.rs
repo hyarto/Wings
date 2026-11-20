@@ -31,7 +31,7 @@ pub struct PixelPostMaterial {
 
 impl Material2d for PixelPostMaterial {
     fn fragment_shader() -> ShaderRef {
-        "embedded://app_client/pixel_post.wesl".into()
+        "embedded://app_client/pixel_post.wgsl".into()
     }
 }
 
@@ -52,7 +52,7 @@ pub struct PixelPipelinePlugin;
 
 impl Plugin for PixelPipelinePlugin {
     fn build(&self, app: &mut App) {
-        embedded_asset!(app, "pixel_post.wesl");
+        embedded_asset!(app, "pixel_post.wgsl");
         app.add_plugins(Material2dPlugin::<PixelPostMaterial>::default())
             .add_systems(Startup, setup_pipeline)
             .add_systems(Update, (fit_quad_to_window, upload_hud));
@@ -121,9 +121,19 @@ fn fit_quad_to_window(windows: Query<&Window>, mut quad: Query<&mut Transform, W
 #[derive(Resource)]
 pub struct HudBuffer(pub crate::cockpit_ui::PixelBuffer);
 
-fn upload_hud(buf: Option<Res<HudBuffer>>, targets: Option<Res<PixelTargets>>, mut images: ResMut<Assets<Image>>) {
+fn upload_hud(
+    buf: Option<Res<HudBuffer>>,
+    targets: Option<Res<PixelTargets>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<PixelPostMaterial>>,
+    quads: Query<&MeshMaterial2d<PixelPostMaterial>>,
+) {
     let (Some(buf), Some(t)) = (buf, targets) else { return };
     if let Some(img) = images.get_mut(&t.hud) {
         img.data = Some(buf.0.data.clone());
+    }
+    // 触碰材质资源 → 强制重建 bind group，使其绑定到刚重新上传的 HUD 纹理。
+    for m in &quads {
+        let _ = materials.get_mut(&m.0);
     }
 }

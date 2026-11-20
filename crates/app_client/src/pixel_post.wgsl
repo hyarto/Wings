@@ -1,10 +1,10 @@
-import bevy_sprite_render::mesh2d::vertex_output::VertexOutput;
+#import bevy_sprite::mesh2d_vertex_output::VertexOutput
 
 // 3D 场景（320x160 离屏纹理，sRGB 编码值）与 2D 像素仪表层（Rgba8Unorm）
-@group(constants::MATERIAL_BIND_GROUP) @binding(0) var scene_tex: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(1) var scene_samp: sampler;
-@group(constants::MATERIAL_BIND_GROUP) @binding(2) var hud_tex: texture_2d<f32>;
-@group(constants::MATERIAL_BIND_GROUP) @binding(3) var hud_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var scene_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var scene_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2) var hud_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var hud_samp: sampler;
 
 // 4x4 Bayer 有序抖动矩阵（0..15）
 fn bayer4(p: vec2<i32>) -> f32 {
