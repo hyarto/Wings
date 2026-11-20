@@ -209,4 +209,18 @@ mod tests {
             assert!(s.iter().any(|x| x.abs() > 0.05), "silent buffer");
         }
     }
+
+    /// 回归测试：必须能被 bevy_audio 实际解码（缺少 `wav` feature 时 `decoder()` 会 unwrap panic：UnrecognizedFormat）。
+    #[test]
+    fn synthesized_audio_is_decodable_by_bevy_audio() {
+        use bevy::audio::Decodable;
+        use bevy::audio::Source;
+        for s in [synth_piston(), synth_turboprop(), synth_turbofan(), synth_wind(), synth_stall_horn(), synth_thump()] {
+            let src = AudioSource { bytes: wav_bytes(&s).into() };
+            let dec = src.decoder();
+            assert_eq!(dec.channels(), 1);
+            assert_eq!(dec.sample_rate(), RATE);
+            assert_eq!(dec.count(), s.len());
+        }
+    }
 }
