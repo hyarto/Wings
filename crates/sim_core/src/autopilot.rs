@@ -36,18 +36,23 @@ impl Pid {
 #[derive(Clone, Debug)]
 pub struct PitchHold {
     pid: Pid,
+    kq: f64,
 }
 impl Default for PitchHold {
     fn default() -> Self {
-        Self { pid: Pid::new(0.08, 0.04, 0.0, 0.6) }
+        Self { pid: Pid::new(0.08, 0.04, 0.0, 0.6), kq: 0.05 }
     }
 }
 impl PitchHold {
+    /// 自定义增益：kp / ki 作用于俯仰角误差（度），kq 为俯仰角速度阻尼（每 °/s）。
+    pub fn new(kp: f64, ki: f64, kq: f64, i_limit: f64) -> Self {
+        Self { pid: Pid::new(kp, ki, 0.0, i_limit), kq }
+    }
     pub fn control(&mut self, sim: &Simulation, target_pitch_deg: f64, dt: f64) -> f64 {
         let err = target_pitch_deg - sim.diag.pitch;
         // 阻尼项使用俯仰角速度（rad/s → 度/s）
         let q = sim.state.rigid.w.x.to_degrees();
-        (self.pid.update(err, dt) - 0.05 * q).clamp(-1.0, 1.0)
+        (self.pid.update(err, dt) - self.kq * q).clamp(-1.0, 1.0)
     }
 }
 
@@ -55,17 +60,22 @@ impl PitchHold {
 #[derive(Clone, Debug)]
 pub struct BankHold {
     pid: Pid,
+    kp_rate: f64,
 }
 impl Default for BankHold {
     fn default() -> Self {
-        Self { pid: Pid::new(0.03, 0.0, 0.0, 0.3) }
+        Self { pid: Pid::new(0.03, 0.0, 0.0, 0.3), kp_rate: 0.02 }
     }
 }
 impl BankHold {
+    /// 自定义增益：kp 作用于坡度误差（度），kr 为滚转角速度阻尼（每 °/s）。
+    pub fn new(kp: f64, kr: f64) -> Self {
+        Self { pid: Pid::new(kp, 0.0, 0.0, 0.3), kp_rate: kr }
+    }
     pub fn control(&mut self, sim: &Simulation, target_bank_deg: f64, dt: f64) -> f64 {
         let err = target_bank_deg - sim.diag.roll;
         let p = (-sim.state.rigid.w.z).to_degrees();
-        (self.pid.update(err, dt) - 0.02 * p).clamp(-1.0, 1.0)
+        (self.pid.update(err, dt) - self.kp_rate * p).clamp(-1.0, 1.0)
     }
 }
 

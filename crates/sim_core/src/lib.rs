@@ -15,6 +15,8 @@ pub mod aero;
 pub mod aircraft;
 pub mod atmosphere;
 pub mod autopilot;
+pub mod blackbox;
+pub mod fleet;
 pub mod gear;
 pub mod integrator;
 pub mod noise;

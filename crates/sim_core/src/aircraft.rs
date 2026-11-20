@@ -1,4 +1,4 @@
-//! 机型数据定义（数据驱动）。M1 内置 SKY-172；其余机型在 M4 补齐。
+//! 机型数据定义（数据驱动）。SKY-172 在此定义；TWIN-6 / JET-39 / LINER-73 / SEA-415 见 `fleet.rs`（M4）。
 
 use crate::structure::StructureLimits;
 use crate::{FT, KT};
@@ -75,7 +75,7 @@ pub struct SurfaceConfig {
 }
 
 impl SurfaceConfig {
-    fn blank(kind: SurfaceKind, pos: DVec3) -> Self {
+    pub(crate) fn blank(kind: SurfaceKind, pos: DVec3) -> Self {
         Self {
             kind,
             pos,
@@ -135,6 +135,8 @@ pub enum ContactKind {
     Wheel,
     /// 机体硬点（尾橇、翼尖、机腹）：接触即为刮擦/撞地。
     Hull,
+    /// 浮筒 / 船体点（M4）：在水面提供浮力 + 水动阻力；在陆地上等同于 `Hull`。
+    Float,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -152,6 +154,10 @@ pub struct ContactConfig {
     pub brake: BrakeGroup,
     pub mu_roll: f64,
     pub retractable: bool,
+    /// 水动阻力面积系数 Cd·A / 每米吃水（m²/m）。仅 `Float` 使用（轮子在水中用固定值）。
+    pub water_drag: f64,
+    /// 刹车可用摩擦比例（0..1，大型机自动刹车限制减速度）。
+    pub brake_power: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -185,11 +191,32 @@ pub struct AircraftConfig {
     pub gear_time: f64,
     /// 重心离地高度（静止，m）——用于放置飞机。
     pub rest_cg_height: f64,
+    /// 襟翼全行程时间（s）。
+    pub flap_time: f64,
+    /// 临界马赫数：超过后出现激波阻力与马赫抖振。
+    pub mach_crit: f64,
+    /// 起落架放下时的附加寄生阻力面积（m²，随收放位置缩放）。
+    pub gear_cda: f64,
+    /// 水陆两栖：可在水面起降（带浮筒/船体）。
+    pub amphibious: bool,
+    /// 配备减速板/扰流板。
+    pub has_speedbrake: bool,
 }
 
 impl AircraftConfig {
     pub fn by_code(code: &str) -> Option<AircraftConfig> {
         builtin().into_iter().find(|a| a.code.eq_ignore_ascii_case(code))
+    }
+    /// 机型简介（菜单显示）。
+    pub fn blurb(&self) -> &'static str {
+        match self.code {
+            "SKY-172" => "TRAINER / 1x PISTON",
+            "TWIN-6" => "STOL / 2x TURBOPROP",
+            "JET-39" => "AEROBATIC / 1x TURBOFAN",
+            "LINER-73" => "AIRLINER / 2x TURBOFAN",
+            "SEA-415" => "AMPHIBIAN / 2x TURBOPROP",
+            _ => "",
+        }
     }
     pub fn default_fuel_kg(&self) -> f64 {
         self.fuel_capacity * 0.7
@@ -210,8 +237,13 @@ impl AircraftConfig {
 
 /// 全部内置机型。
 pub fn builtin() -> Vec<AircraftConfig> {
-    vec![sky172()]
+    vec![sky172(), crate::fleet::twin6(), crate::fleet::jet39(), crate::fleet::liner73(), crate::fleet::sea415()]
 }
+
+/// 全部机型代号（菜单顺序）。
+pub const CODES: [&str; 5] = ["SKY-172", "TWIN-6", "JET-39", "LINER-73", "SEA-415"];
+
+pub use crate::fleet::{jet39, liner73, sea415, twin6};
 
 /// SKY-172：Cessna 172 风格单发活塞教练机。
 pub fn sky172() -> AircraftConfig {
@@ -303,6 +335,8 @@ pub fn sky172() -> AircraftConfig {
         brake: if side < 0.0 { BrakeGroup::Left } else { BrakeGroup::Right },
         mu_roll: 0.025,
         retractable: false,
+        water_drag: 0.0,
+        brake_power: 1.0,
     };
     let nose = ContactConfig {
         kind: ContactKind::Wheel,
@@ -317,6 +351,8 @@ pub fn sky172() -> AircraftConfig {
         brake: BrakeGroup::None,
         mu_roll: 0.03,
         retractable: false,
+        water_drag: 0.0,
+        brake_power: 1.0,
     };
     let hull = |pos: DVec3| ContactConfig {
         kind: ContactKind::Hull,
@@ -331,6 +367,8 @@ pub fn sky172() -> AircraftConfig {
         brake: BrakeGroup::None,
         mu_roll: 0.5,
         retractable: false,
+        water_drag: 0.0,
+        brake_power: 1.0,
     };
 
     AircraftConfig {
@@ -385,5 +423,10 @@ pub fn sky172() -> AircraftConfig {
         control_rate: 4.0,
         gear_time: 0.0,
         rest_cg_height: 1.07,
+        flap_time: 11.0,
+        mach_crit: 0.85,
+        gear_cda: 0.0,
+        amphibious: false,
+        has_speedbrake: false,
     }
 }

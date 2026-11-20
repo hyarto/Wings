@@ -43,6 +43,8 @@ pub struct ControlInputs {
     pub reverse: bool,
     pub pitot_heat: bool,
     pub deice: bool,
+    /// 顺桨（仅对已失效的涡桨发动机生效）。
+    pub feather: bool,
 }
 
 impl Default for ControlInputs {
@@ -62,6 +64,7 @@ impl Default for ControlInputs {
             reverse: false,
             pitot_heat: false,
             deice: false,
+            feather: false,
         }
     }
 }
@@ -87,11 +90,13 @@ pub struct EngineState {
     pub fuel_flow: f64, // kg/s
     pub running: bool,
     pub failed: bool,
+    /// 螺旋桨已顺桨（失效后风车阻力大幅降低）。
+    pub feathered: bool,
 }
 
 impl Default for EngineState {
     fn default() -> Self {
-        Self { throttle: 0.0, rpm: 0.0, power_w: 0.0, thrust_n: 0.0, fuel_flow: 0.0, running: true, failed: false }
+        Self { throttle: 0.0, rpm: 0.0, power_w: 0.0, thrust_n: 0.0, fuel_flow: 0.0, running: true, failed: false, feathered: false }
     }
 }
 

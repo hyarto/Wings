@@ -104,7 +104,12 @@ pub fn update(
             if reverse && running {
                 t = -reverse_ratio * static_thrust * (p / power_w).powf(2.0 / 3.0) * (1.0 - (v / 80.0).powi(2)).max(0.2);
             }
-            let rpm = if running { max_rpm * (0.55 + 0.45 * thr_eff.powf(0.5)) } else { 0.0 };
+            if !running {
+                // 失效螺旋桨：风车阻力（顺桨后大幅降低）
+                let cd_a = if st.feathered { 0.012 } else { 0.16 } * disc_area;
+                t = -0.5 * atm.density * v * v * cd_a;
+            }
+            let rpm = if running { max_rpm * (0.55 + 0.45 * thr_eff.powf(0.5)) } else if st.feathered { 0.0 } else { (v * 9.0).min(max_rpm * 0.4) };
             let omega = (rpm * 2.0 * PI / 60.0).max(1.0);
             out = EngineOutput {
                 thrust: t,
@@ -123,7 +128,11 @@ pub fn update(
             if reverse && running && v > 8.0 {
                 t = -reverse_ratio * thrust_n * thr_eff.powf(1.15) * lapse;
             }
-            let n1 = if running { 100.0 * (0.25 + 0.75 * thr_eff.powf(0.6)) } else { v * 0.5 };
+            if !running {
+                // 风车风扇阻力
+                t = -0.5 * atm.density * v * v * 0.25;
+            }
+            let n1 = if running { 100.0 * (0.25 + 0.75 * thr_eff.powf(0.6)) } else { (v * 0.12).min(25.0) };
             out = EngineOutput {
                 thrust: t,
                 power_w: t.abs() * v,

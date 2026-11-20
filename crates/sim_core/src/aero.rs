@@ -55,6 +55,21 @@ pub struct AeroInputs<'a> {
     pub damage: &'a DamageState,
     /// 螺旋桨滑流附加速度（m/s）。
     pub slipstream: f64,
+    /// 当地声速（m/s），用于马赫阻力 / 抖振。
+    pub sound_speed: f64,
+    /// 起落架收放位置 0..1（附加寄生阻力）。
+    pub gear_pos: f64,
+}
+
+/// 激波阻力系数增量（Δ = M - M_crit，三次方陡升）。
+pub fn wave_drag(mach: f64, mach_crit: f64) -> f64 {
+    let d = (mach - mach_crit).max(0.0);
+    100.0 * d * d * d
+}
+
+/// 马赫抖振：高马赫下临界迎角提前（rad）。与低速失速共同构成“棺材角”。
+pub fn mach_stall_shift(mach: f64, mach_crit: f64) -> f64 {
+    0.9 * (mach - (mach_crit + 0.02)).max(0.0)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -77,15 +92,32 @@ pub fn section(
     flap: f64,
     spoiler: f64,
 ) -> Section {
+    section_m(s, alpha, delta, ice, induced_mult, slope_boost, flap, spoiler, 0.0, 0.0)
+}
+
+/// 同 `section`，附带马赫效应：`mach_shift`（失速角提前，rad）与 `wave_cd`（激波阻力）。
+#[allow(clippy::too_many_arguments)]
+pub fn section_m(
+    s: &SurfaceConfig,
+    alpha: f64,
+    delta: f64,
+    ice: f64,
+    induced_mult: f64,
+    slope_boost: f64,
+    flap: f64,
+    spoiler: f64,
+    mach_shift: f64,
+    wave_cd: f64,
+) -> Section {
     let ice = (ice * s.ice_sensitivity).clamp(0.0, 1.0);
     let dstall = 5f64.to_radians() * ice;
-    let a_pos = (s.alpha_stall_pos - 0.5 * delta - dstall).max(0.05);
-    let a_neg = (s.alpha_stall_neg - 0.5 * delta + dstall).min(-0.05);
+    let a_pos = (s.alpha_stall_pos - 0.5 * delta - dstall - mach_shift).max(0.05);
+    let a_neg = (s.alpha_stall_neg - 0.5 * delta + dstall + mach_shift).min(-0.05);
 
     // 结冰使 CLmax 最多下降 40%：综合“失速角提前”与“斜率缩放”两个效应
     let f_ice = 1.0 - 0.40 * ice;
     let base_span = (s.alpha_stall_pos - s.alpha0).max(0.05);
-    let k_ice = f_ice * base_span / (base_span - dstall).max(0.05);
+    let k_ice = f_ice * base_span / (base_span - dstall - mach_shift).max(0.05);
 
     let a_lin = alpha.clamp(a_neg, a_pos);
     let cl_lin = k_ice * s.cl_alpha * (1.0 + slope_boost) * (a_lin + delta - s.alpha0);
@@ -102,7 +134,7 @@ pub fn section(
     let cdi = cl_lin * cl_lin / (PI * s.oswald * s.aspect_ratio) * induced_mult;
     let cd0 = s.cd0 * (1.0 + 1.5 * ice);
     let cd_extra = s.flap_cd * flap * flap + s.spoiler_cd * spoiler;
-    let cd = cd0 + cd_extra + (1.0 - sigma) * cdi + sigma * cd_fp;
+    let cd = cd0 + cd_extra + wave_cd + (1.0 - sigma) * cdi + sigma * cd_fp;
     Section { cl, cd, sigma, cl_lin }
 }
 
@@ -150,10 +182,13 @@ pub fn compute(cfg: &AircraftConfig, rs: &RigidState, inp: &AeroInputs, out: &mu
 
             if s.kind == SurfaceKind::Fuselage {
                 let speed = v.length();
+                let mach = speed / inp.sound_speed.max(1.0);
+                let wave = 1.0 + 40.0 * (mach - cfg.mach_crit).max(0.0).powi(2);
+                let gear_cd = cfg.gear_cda * inp.gear_pos;
                 let f = DVec3::new(
-                    -0.5 * inp.rho * speed * s.body_cda.x * v.x,
-                    -0.5 * inp.rho * speed * s.body_cda.y * v.y,
-                    -0.5 * inp.rho * speed * s.body_cda.z * v.z,
+                    -0.5 * inp.rho * speed * (s.body_cda.x + 4.0 * gear_cd) * v.x,
+                    -0.5 * inp.rho * speed * (s.body_cda.y + 4.0 * gear_cd) * v.y,
+                    -0.5 * inp.rho * speed * (s.body_cda.z * wave + gear_cd) * v.z,
                 ) * (1.0 + 1.5 * inp.ice);
                 out.force += f;
                 out.moment += s.pos.cross(f);
@@ -186,7 +221,13 @@ pub fn compute(cfg: &AircraftConfig, rs: &RigidState, inp: &AeroInputs, out: &mu
                 + ctl.spoiler * s.gains.spoiler;
 
             let (induced_mult, boost) = if s.kind.is_wing() { (phi, slope_boost) } else { (1.0, 0.0) };
-            let sec = section(s, alpha, delta, inp.ice, induced_mult, boost, flaps, ctl.spoiler);
+            let mach = speed / inp.sound_speed.max(1.0);
+            let (m_shift, m_wave) = if mach > cfg.mach_crit - 0.1 {
+                (mach_stall_shift(mach, cfg.mach_crit), wave_drag(mach, cfg.mach_crit))
+            } else {
+                (0.0, 0.0)
+            };
+            let sec = section_m(s, alpha, delta, inp.ice, induced_mult, boost, flaps, ctl.spoiler, m_shift, m_wave);
 
             let q = 0.5 * inp.rho * speed * speed;
             let d_hat = -v2 / speed;

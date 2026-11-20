@@ -109,6 +109,14 @@ pub struct GearOutput {
     pub hull_contact: bool,
     /// 机体硬点最大撞击速度（m/s）。
     pub hull_impact_speed: f64,
+    /// 浮筒/船体点正在水中（M4）。
+    pub float_contact: bool,
+    /// 轮子陷入水中（起落架放下入水 → 翻覆）。
+    pub wheel_water: bool,
+    /// 浮筒/船体点最大水中冲击速度（m/s）。
+    pub water_impact_speed: f64,
+    /// 吃水总量（m，所有水中接触点压缩量之和）。
+    pub total_draft: f64,
     /// 所有主轮/前轮的总法向力。
     pub total_normal: f64,
 }
@@ -122,10 +130,19 @@ impl Default for GearOutput {
             wheel_contact: false,
             hull_contact: false,
             hull_impact_speed: 0.0,
+            float_contact: false,
+            wheel_water: false,
+            water_impact_speed: 0.0,
+            total_draft: 0.0,
             total_normal: 0.0,
         }
     }
 }
+
+/// 水密度（kg/m³）。
+pub const RHO_WATER: f64 = 1000.0;
+/// 轮子（及支柱）入水时的水动阻力面积系数（m²/m）：极大，使入水翻覆。
+pub const WHEEL_WATER_DRAG: f64 = 1.6;
 
 pub fn evaluate(cfg: &AircraftConfig, rs: &RigidState, ground: &dyn Ground, inp: &GearInputs, out: &mut GearOutput) {
     *out = GearOutput::default();
@@ -135,7 +152,8 @@ pub fn evaluate(cfg: &AircraftConfig, rs: &RigidState, ground: &dyn Ground, inp:
     let axis = q * (-DVec3::Y);
 
     for (i, c) in cfg.contacts.iter().enumerate() {
-        let is_hull = c.kind == ContactKind::Hull;
+        let is_float = c.kind == ContactKind::Float;
+        let mut is_hull = c.kind == ContactKind::Hull;
         let (mut rest_len, mut radius, mut k, mut mu_roll, mut brake_group) =
             (c.rest_len, c.radius, c.k, c.mu_roll, c.brake);
         if !is_hull {
@@ -157,6 +175,12 @@ pub fn evaluate(cfg: &AircraftConfig, rs: &RigidState, ground: &dyn Ground, inp:
         let attach = rs.pos + q * c.pos;
         let probe = attach + axis * (rest_len + radius);
         let g = ground.sample(probe.x, probe.z);
+        let on_water = g.surface == SurfaceType::Water;
+        // 浮筒在陆地上等同于机体硬点
+        if is_float && !on_water {
+            is_hull = true;
+        }
+        let water_mode = on_water && (is_float || !is_hull) && c.kind != ContactKind::Hull;
         let n = g.normal;
         let an = axis.dot(n);
         if an > -0.05 {
@@ -191,6 +215,40 @@ pub fn evaluate(cfg: &AircraftConfig, rs: &RigidState, ground: &dyn Ground, inp:
         let vx = v_pt.dot(f);
         let vy = v_pt.dot(right);
 
+        if water_mode {
+            // 浮力（弹簧-阻尼 = 排水体积）+ 水动阻力（正比于吃水与速度平方）
+            let wd = if is_float { c.water_drag } else { WHEEL_WATER_DRAG };
+            let depth = compression.min(c.travel.max(0.3) * 2.0);
+            let visc = 2500.0;
+            let kx = (0.5 * RHO_WATER * vx.abs() + visc) * wd * depth;
+            let ky = (0.5 * RHO_WATER * vy.abs() + visc) * wd * depth * 6.0;
+            let fx = -kx * vx;
+            let fy = -ky * vy;
+            let force_w = n * nf + f * fx + right * fy;
+            out.force += qi * force_w;
+            out.moment += qi * r_w.cross(force_w);
+            out.total_normal += nf;
+            out.total_draft += compression;
+            if i < 16 {
+                out.contacts[i] = ContactDiag {
+                    in_contact: true,
+                    compression,
+                    normal_force: nf,
+                    roll_speed: vx,
+                    compress_rate: rate,
+                    is_hull: false,
+                };
+            }
+            if is_float {
+                out.float_contact = true;
+                out.water_impact_speed = out.water_impact_speed.max(rate.max(0.0));
+            } else {
+                out.wheel_contact = true;
+                out.wheel_water = true;
+            }
+            continue;
+        }
+
         let mu = if is_hull {
             0.5
         } else if inp.collapsed {
@@ -205,7 +263,7 @@ pub fn evaluate(cfg: &AircraftConfig, rs: &RigidState, ground: &dyn Ground, inp:
         }
         .clamp(0.0, 1.0);
 
-        let long_coeff = mu_roll + brake * mu;
+        let long_coeff = mu_roll + brake * mu * c.brake_power;
         let mut fx = -long_coeff * nf * (vx / 0.4).tanh();
         let mut fy = -mu * nf * (vy / 0.25).tanh();
         let max_f = mu * nf;

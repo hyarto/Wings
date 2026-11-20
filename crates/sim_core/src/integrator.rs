@@ -67,6 +67,8 @@ struct Dynamics<'a> {
     trim: f64,
     damage: &'a crate::structure::DamageState,
     slipstream: f64,
+    sound_speed: f64,
+    gear_pos: f64,
     thrust_force: DVec3,
     thrust_moment: DVec3,
     gear_in: GearInputs,
@@ -86,6 +88,8 @@ impl Dynamics<'_> {
             trim: self.trim,
             damage: self.damage,
             slipstream: self.slipstream,
+            sound_speed: self.sound_speed,
+            gear_pos: self.gear_pos,
         };
         aero::compute(self.cfg, s, &inp, aero_out);
         gear::evaluate(self.cfg, s, self.ground, &self.gear_in, gear_out);
@@ -203,6 +207,47 @@ impl Simulation {
         }
     }
 
+    /// 使指定发动机失效（单发失效训练）。
+    pub fn fail_engine(&mut self, idx: usize) {
+        if let Some(e) = self.state.engines.get_mut(idx) {
+            e.failed = true;
+        }
+    }
+
+    /// 瞬时设置起落架位置（出生/测试用）。
+    pub fn set_gear_instant(&mut self, down: bool) {
+        self.controls.gear_down = down;
+        self.state.gear_pos = if down { 1.0 } else { 0.0 };
+    }
+
+    /// 浮筒/船体点总刚度（N/m），无浮筒返回 0。
+    pub fn float_stiffness(&self) -> f64 {
+        self.config
+            .contacts
+            .iter()
+            .filter(|c| c.kind == crate::aircraft::ContactKind::Float)
+            .map(|c| c.k)
+            .sum()
+    }
+
+    /// 把水陆两栖机放置在水面上（收轮，按浮力平衡吃水）。
+    pub fn place_on_water(&mut self) {
+        self.set_gear_instant(false);
+        let (x, z) = (self.state.rigid.pos.x, self.state.rigid.pos.z);
+        let wh = self.ground.sample(x, z).height;
+        let k = self.float_stiffness().max(1.0);
+        let draft = self.total_mass() * G / k;
+        let keel = self
+            .config
+            .contacts
+            .iter()
+            .filter(|c| c.kind == crate::aircraft::ContactKind::Float)
+            .map(|c| c.pos.y)
+            .fold(f64::MAX, f64::min);
+        self.state.rigid.pos.y = wh - keel - draft;
+        self.state.on_ground = true;
+    }
+
     pub fn total_mass(&self) -> f64 {
         let c = &self.config;
         c.mass_empty + c.payload + self.state.fuel_kg + self.state.ice_load * c.max_ice_mass
@@ -234,7 +279,7 @@ impl Simulation {
             follow(&mut st.aileron, ctl.roll.clamp(-1.0, 1.0), rate);
             follow(&mut st.rudder, ctl.yaw.clamp(-1.0, 1.0), rate);
             if self.state.damage.flaps_jammed.is_none() {
-                follow(&mut st.flaps, ctl.flaps.clamp(0.0, 1.0), 0.09 * dt);
+                follow(&mut st.flaps, ctl.flaps.clamp(0.0, 1.0), dt / self.config.flap_time.max(1.0));
             }
             follow(&mut st.spoiler, ctl.speedbrake.clamp(0.0, 1.0), 1.5 * dt);
             if self.config.gear_time > 0.0 {
@@ -272,6 +317,7 @@ impl Simulation {
         let deice_active = ctl.deice && self.config.has_deice;
         for (j, ecfg) in self.config.engines.iter().enumerate() {
             let est = &mut self.state.engines[j];
+            est.feathered = ctl.feather && est.failed;
             let v_axial = v_air_b.dot(FWD);
             let fuel_ok = self.state.fuel_kg > 0.0;
             let out = propulsion::update(ecfg, est, ctl.throttle, ctl.reverse, v_axial, &atm, fuel_ok, dt);
@@ -309,6 +355,8 @@ impl Simulation {
             trim: ctl.pitch_trim,
             damage: &self.state.damage,
             slipstream,
+            sound_speed: atm.speed_of_sound,
+            gear_pos: self.state.gear_pos,
             thrust_force,
             thrust_moment,
             gear_in: GearInputs {
@@ -352,7 +400,7 @@ impl Simulation {
         self.state.time += dt;
 
         // ---------- 6. 触地 / 撞地 ----------
-        let any_wheel = gear_out.wheel_contact;
+        let any_wheel = gear_out.wheel_contact || gear_out.float_contact;
         let mut touchdown = None;
         if any_wheel {
             if self.state.air_time > 0.5 {
@@ -371,6 +419,10 @@ impl Simulation {
             self.state.contact_prev[i] = c.in_contact;
         }
         if gear_out.hull_contact && gear_out.hull_impact_speed > 3.0 {
+            self.state.damage.crashed = true;
+        }
+        // 起落架放下冲入水面 → 翻覆
+        if gear_out.wheel_water && DVec3::new(s.vel.x, 0.0, s.vel.z).length() > 14.0 {
             self.state.damage.crashed = true;
         }
         let gh_new = self.ground.sample(s.pos.x, s.pos.z).height;
