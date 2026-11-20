@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/sim_core", "crates/world_gen", "crates/app_client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# 统一依赖版本。sim_core / world_gen 严禁依赖 bevy。
+[workspace.dependencies]
+glam = "0.30"
+
+# 开发期：所有第三方依赖 opt-level=2，保证 debug 下物理/噪声流畅
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# 纯计算 crate 在 dev/test 下也全速运行，使无头试飞测试足够快
+[profile.dev.package.sim_core]
+opt-level = 3
+[profile.dev.package.world_gen]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+codegen-units = 4
