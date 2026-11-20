@@ -460,3 +460,79 @@ fn radar_builds_real_terrain_grid_and_auto_pops_up_on_terrain_alert() {
     assert!(hazard > 20, "terrain above the aircraft must show as red");
     assert!(lines > 20, "contour lines must be drawn");
 }
+
+// ------------------------------------------------------------ 截图（目视检查）----
+
+/// 设置环境变量 `STRATO_DUMP=目录` 时，把几个典型界面渲染成 PPM（叠在假的天空/地面背景上）。
+#[test]
+fn dump_screens_for_visual_inspection() {
+    let Ok(dir) = std::env::var("STRATO_DUMP") else { return };
+    let save = |name: &str, b: &PixelBuffer| {
+        let mut out = format!("P6\n320 160\n255\n").into_bytes();
+        for y in 0..160 {
+            for x in 0..320 {
+                let bg: [f32; 3] = if y < 70 { [70.0, 120.0, 200.0] } else { [120.0, 100.0, 70.0] };
+                let c = b.get(x, y);
+                let a = c[3] as f32 / 255.0;
+                for k in 0..3 {
+                    out.push((c[k] as f32 * a + bg[k] * (1.0 - a)) as u8);
+                }
+            }
+        }
+        std::fs::write(format!("{dir}/{name}.ppm"), out).unwrap();
+    };
+    let mut h = FlightHud { ias_kt: 120.0, alt_ft: 5200.0, vs_fpm: 0.0, agl_ft: 900.0, heading: 40.0, gs_kt: 118.0, code: "TWIN-6".into(), engine_label: "RPM", rpm: 1800.0, fuel_kg: 300.0, throttle: 0.7, nav_text: "IABC 12K".into(), time: 0.0, ..Default::default() };
+    h.pitot = SystemState::On;
+    h.deice = SystemState::On;
+    h.icing_cond = true;
+    h.ice = 0.1;
+    save("1_cockpit_equipped_deice_on", &render(&h, ViewMode::Cockpit));
+
+    let mut h2 = FlightHud { code: "SKY-172".into(), pitot: SystemState::Off, deice: SystemState::NotFitted, icing_cond: true, ice: 0.5, pitot_blocked: true, toast: Some("NO DE-ICE SYSTEM ON THIS AIRCRAFT".into()), ..h.clone() };
+    h2.time = 0.0;
+    save("2_cockpit_sky172_no_deice_pitot_blocked", &render(&h2, ViewMode::Cockpit));
+
+    // 雷达场景：真实世界的山
+    let w = world();
+    let ((_, _), hdg, alt, p) = find_mountain_approach(&w);
+    let dir = DVec3::new(hdg.to_radians().sin(), 0.0, -hdg.to_radians().cos());
+    let pos = DVec3::new(p.0, alt, p.1) - dir * 3500.0;
+    let height = |x: f64, z: f64| w.height(x, z);
+    let mut r = TerrainRadar::default();
+    r.mode = RadarMode::Small;
+    while r.grid.is_none() {
+        r.update_grid(&height, pos.x, pos.z);
+    }
+    let v = terrain_radar::RadarView { x: pos.x, z: pos.z, heading: hdg, alt, vs: 0.0, gs: 51.4, agl_ft: (alt - w.height(pos.x, pos.z)) / 0.3048, time: 0.0 };
+    let inp = TawsInput { pos, vel: dir * 51.4, agl: alt - w.height(pos.x, pos.z), gear_down: false, on_ground: false, airport_dist: f64::MAX, ignore_water: false };
+    let st = taws::evaluate(&height, &inp);
+    r.alert = st.alert;
+    println!("scenario alert {:?} min_clear {:?}", st.alert, st.min_clearance);
+    let mut h3 = FlightHud { heading: hdg, alt_ft: alt / 0.3048, agl_ft: v.agl_ft, taws: st.alert, toast: Some("TERRAIN RADAR".into()), ..h.clone() };
+    h3.time = 0.0;
+    let mut b = PixelBuffer::new();
+    draw_flight(&mut b, &h3, ViewMode::Cockpit);
+    terrain_radar::draw_radar(&mut b, &r, &v);
+    draw_alerts(&mut b, &h3, 30);
+    save("3_cockpit_small_radar_terrain_caution", &b);
+
+    r.mode = RadarMode::Large;
+    r.profile = sim_core::terrain_map::profile(&height, pos.x, pos.z, hdg, r.range(), 64);
+    let pos2 = pos + dir * 2200.0;
+    let inp2 = TawsInput { pos: pos2, vel: dir * 51.4, agl: alt - w.height(pos2.x, pos2.z), ..inp };
+    let st2 = taws::evaluate(&height, &inp2);
+    r.alert = st2.alert;
+    let v2 = terrain_radar::RadarView { x: pos2.x, z: pos2.z, ..v };
+    r.profile = sim_core::terrain_map::profile(&height, pos2.x, pos2.z, hdg, r.range(), 64);
+    let h4 = FlightHud { taws: st2.alert, toast: None, ..h3.clone() };
+    let mut b = PixelBuffer::new();
+    draw_flight(&mut b, &h4, ViewMode::Cockpit);
+    terrain_radar::draw_radar(&mut b, &r, &v2);
+    draw_alerts(&mut b, &h4, 30);
+    save("4_cockpit_large_radar_profile", &b);
+
+    let mut b = PixelBuffer::new();
+    draw_flight(&mut b, &h4, ViewMode::Hud);
+    terrain_radar::draw_radar(&mut b, &r, &v2);
+    save("5_hud_view_large_radar", &b);
+}
