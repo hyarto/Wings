@@ -2,20 +2,73 @@
 //!
 //! 键盘：W/S 或 ↑/↓ 俯仰（S/↓ 拉杆）、A/D 或 ←/→ 滚转、Q/E 方向舵、Shift/Ctrl 油门↑↓（Z 全油门 X 慢车）、
 //! F/V 襟翼放/收、G 起落架、Space 刹车、B 驻车刹车、T/Y 配平、H 皮托加温、I 除冰、J 减速板、K 反推、
-//! 1-4 视角（驾驶舱/HUD/追尾/掠过）、M 航图、C 切换天气、P 暂停、Backspace 重置。
+//! 1-4 视角（驾驶舱/HUD/追尾/掠过）、M 航图、Tab 开始菜单、R 黑匣子回放（←/→ 快退/快进，F5 导出 CSV）、F9 失效一台发动机、F10 顺桨、C 切换天气、P 暂停、Backspace 重置。
 
 use crate::cockpit_ui::ViewMode;
 use crate::{GameState, Screen};
 use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton};
 use bevy::prelude::*;
 
-pub fn read_input(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut game: ResMut<GameState>, time: Res<Time>) {
+pub fn read_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    pads: Query<&Gamepad>,
+    mut game: ResMut<GameState>,
+    time: Res<Time>,
+    menu: Option<ResMut<crate::menu::MenuState>>,
+) {
     let dt = time.delta_secs_f64();
+    // Tab：开始菜单（选机型 / 机场 / 天气 / 季节 / 种子）
+    if keys.just_pressed(KeyCode::Tab) {
+        if game.screen == Screen::Menu {
+            game.screen = Screen::Flight;
+        } else {
+            game.screen = Screen::Menu;
+            if let Some(mut m) = menu {
+                *m = crate::menu::MenuState::from_game(&game);
+            }
+        }
+        return;
+    }
+    if game.screen == Screen::Menu {
+        return;
+    }
     if keys.just_pressed(KeyCode::KeyM) {
         game.screen = if game.screen == Screen::Flight { Screen::Map } else { Screen::Flight };
     }
     if game.screen != Screen::Flight {
         return;
+    }
+    // 黑匣子：R 回放/退出回放；回放中 ←/→ 快退/快进 5 s；F5 导出 CSV
+    if keys.just_pressed(KeyCode::KeyR) {
+        if game.replay.is_some() {
+            game.stop_replay();
+        } else {
+            game.start_replay();
+        }
+    }
+    if keys.just_pressed(KeyCode::F5) {
+        let _ = std::fs::write("blackbox.csv", game.blackbox.to_csv());
+    }
+    if game.replay.is_some() {
+        if keys.just_pressed(KeyCode::ArrowLeft) {
+            game.replay_tick(-5.0);
+        }
+        if keys.just_pressed(KeyCode::ArrowRight) {
+            game.replay_tick(5.0);
+        }
+        if keys.just_pressed(KeyCode::KeyP) {
+            game.paused = !game.paused;
+        }
+        return;
+    }
+    // 单发失效训练：F9 使下一台发动机失效；F10 顺桨
+    if keys.just_pressed(KeyCode::F9) {
+        if let Some(i) = game.sim.state.engines.iter().position(|e| !e.failed) {
+            game.sim.fail_engine(i);
+        }
+    }
+    if keys.just_pressed(KeyCode::F10) {
+        game.sim.controls.feather = !game.sim.controls.feather;
     }
     let ax = |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i32 - keys.pressed(neg) as i32) as f64;
     // 键盘：S/↓ = 拉杆（抬头）

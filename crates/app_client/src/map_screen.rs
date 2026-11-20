@@ -83,6 +83,11 @@ pub struct MapState {
 }
 
 fn setup_map(mut commands: Commands, game: Res<GameState>) {
+    commands.insert_resource(make_map_state(&game));
+}
+
+/// 依据当前世界构造航图状态（世界种子变化后需重建）。
+pub fn make_map_state(game: &GameState) -> MapState {
     let markers = game
         .world
         .airports()
@@ -98,7 +103,7 @@ fn setup_map(mut commands: Commands, game: Res<GameState>) {
         })
         .collect();
     let p = game.sim.state.rigid.pos;
-    commands.insert_resource(MapState { cursor: project(p.x, p.z), selected: None, terrain: None, terrain_day: -999.0, task: None, markers });
+    MapState { cursor: project(p.x, p.z), selected: None, terrain: None, terrain_day: -999.0, task: None, markers }
 }
 
 fn map_system(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut game: ResMut<GameState>, mut map: ResMut<MapState>, mut hud: ResMut<HudBuffer>) {

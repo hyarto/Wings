@@ -9,6 +9,7 @@ mod audio;
 mod cockpit_ui;
 mod input;
 mod map_screen;
+mod menu;
 mod mesh_util;
 mod origin;
 mod pixel_pipeline;
@@ -17,6 +18,8 @@ mod weather_fx;
 
 #[cfg(test)]
 mod headless_tests;
+#[cfg(test)]
+mod m4_tests;
 
 use bevy::camera::{Camera, Viewport};
 use bevy::math::DVec3;
@@ -25,7 +28,10 @@ use bevy::window::WindowPlugin;
 use cockpit_ui::{FlightHud, IlsHud, PixelBuffer, ViewMode};
 use origin::{sync_anchors, FloatingOrigin};
 use pixel_pipeline::{HudBuffer, SceneCamera, COCKPIT_VIEW_H, H, W};
-use sim_core::aircraft::AircraftConfig;
+use sim_core::aircraft::{AircraftConfig, CODES};
+use sim_core::blackbox::BlackBox;
+use sim_core::integrator::Diagnostics;
+use sim_core::state::AircraftState;
 use sim_core::gear::{Ground, GroundSample, SurfaceType};
 use sim_core::integrator::Simulation;
 use sim_core::{FT, KT};
@@ -38,6 +44,15 @@ use world_gen::World;
 pub enum Screen {
     Flight,
     Map,
+    /// 开始菜单：选机型 / 出发机场 / 天气 / 季节 / 世界种子（Tab 随时打开）。
+    Menu,
+}
+
+/// 黑匣子回放状态：保存实时飞行状态，回放结束后恢复。
+pub struct Replay {
+    pub t: f64,
+    pub saved: AircraftState,
+    pub saved_diag: Diagnostics,
 }
 
 /// 把 `world_gen::World` 适配为 sim_core 的地面查询接口（含机场跑道地表）。
@@ -89,18 +104,35 @@ pub struct GameState {
     pub time: f64,
     pub flyby: Option<DVec3>,
     pub td_played: f64,
+    /// 当前机型在 `CODES` 中的序号。
+    pub aircraft: usize,
+    pub seed: u64,
+    /// 水陆两栖机从水面起飞（其余机型忽略）。
+    pub water_start: bool,
+    /// 世界重新生成计数（地形/机场可视化据此重建）。
+    pub world_epoch: u32,
+    pub blackbox: BlackBox,
+    pub replay: Option<Replay>,
 }
 
 impl GameState {
     pub fn new(seed: u64, icao: Option<&str>, day: f64, hour: f64) -> Self {
+        Self::new_with(seed, icao, day, hour, "SKY-172")
+    }
+
+    /// 默认出发机场：低纬度国际枢纽。
+    pub fn default_airport(world: &World) -> usize {
+        let aps = world.airports();
+        aps.iter().position(|a| a.kind == world_gen::airport::AirportKind::International && a.lat.abs() < 55.0).unwrap_or(0)
+    }
+
+    pub fn new_with(seed: u64, icao: Option<&str>, day: f64, hour: f64, code: &str) -> Self {
         let world = Arc::new(World::new(seed));
         let aps = world.airports();
-        let idx = icao
-            .and_then(|c| aps.iter().position(|a| a.icao.eq_ignore_ascii_case(c)))
-            .or_else(|| aps.iter().position(|a| a.kind == world_gen::airport::AirportKind::International && a.lat.abs() < 55.0))
-            .unwrap_or(0);
+        let idx = icao.and_then(|c| aps.iter().position(|a| a.icao.eq_ignore_ascii_case(c))).unwrap_or_else(|| Self::default_airport(&world));
         let ap = &aps[idx];
-        let cfg = AircraftConfig::by_code("SKY-172").expect("SKY-172");
+        let aircraft = CODES.iter().position(|c| c.eq_ignore_ascii_case(code)).unwrap_or(0);
+        let cfg = AircraftConfig::by_code(CODES[aircraft]).expect("aircraft");
         let sim = Simulation::new(cfg, Box::new(WorldGround { world: world.clone(), day }), (ap.center.0, ap.center.1), ap.heading0);
         let mut g = Self {
             sim,
@@ -116,9 +148,48 @@ impl GameState {
             time: 0.0,
             flyby: None,
             td_played: 0.0,
+            aircraft,
+            seed,
+            water_start: false,
+            world_epoch: 0,
+            blackbox: BlackBox::default(),
+            replay: None,
         };
         g.depart(idx);
         g
+    }
+
+    /// 重新生成星球（世界种子）。机场序号重置为默认枢纽。
+    pub fn set_world(&mut self, seed: u64) {
+        self.world = Arc::new(World::new(seed));
+        self.seed = seed;
+        self.world_epoch += 1;
+        self.airport = Self::default_airport(&self.world);
+    }
+
+    /// 切换机型并从当前机场重新出发。
+    pub fn set_aircraft(&mut self, idx: usize) {
+        self.aircraft = idx % CODES.len();
+        let i = self.airport;
+        self.depart(i);
+    }
+
+    /// 在机场附近寻找开阔水面（海/湖）：返回 (x, z)。要求沿航向 2.4 km 全为水。
+    pub fn find_water_near(&self, ap_idx: usize, heading_deg: f64) -> Option<(f64, f64)> {
+        let ap = &self.world.airports()[ap_idx];
+        let (hx, hz) = (heading_deg.to_radians().sin(), -heading_deg.to_radians().cos());
+        let clear = |x: f64, z: f64| (0..=8).all(|k| self.world.height(x + hx * 300.0 * k as f64, z + hz * 300.0 * k as f64) < -4.0);
+        for ring in 1..=60 {
+            let r = 1500.0 * ring as f64;
+            for a in 0..24 {
+                let th = a as f64 / 24.0 * std::f64::consts::TAU;
+                let (x, z) = (ap.center.0 + r * th.cos(), ap.center.1 + r * th.sin());
+                if clear(x, z) {
+                    return Some((x, z));
+                }
+            }
+        }
+        None
     }
 
     /// 从指定机场起飞：停在迎风一端的跑道入口，朝向跑道方向，天气按当前预设。
@@ -130,15 +201,81 @@ impl GameState {
         let t = ap.ends[end];
         let (dx, dz) = ap.landing_dir(end);
         let pos = (t.0 + dx * 14.0, t.1 + dz * 14.0);
-        let cfg = AircraftConfig::by_code("SKY-172").expect("SKY-172");
-        let mut sim = Simulation::new(cfg, Box::new(WorldGround { world: self.world.clone(), day: self.day }), pos, ap.heading_of_end(end));
-        weather_fx::apply_preset(&mut sim, self.preset, ap.lat, self.day, Some(ap.heading_of_end(end)));
-        sim.controls.parking_brake = true;
+        let cfg = AircraftConfig::by_code(CODES[self.aircraft % CODES.len()]).expect("aircraft");
+        let amphibious = cfg.amphibious;
+        let mut hdg = ap.heading_of_end(end);
+        let mut start = pos;
+        let mut on_water = false;
+        if amphibious && self.water_start {
+            if let Some(w) = self.find_water_near(idx, hdg) {
+                start = w;
+                on_water = true;
+            }
+        }
+        let mut sim = Simulation::new(cfg, Box::new(WorldGround { world: self.world.clone(), day: self.day }), start, hdg);
+        if on_water {
+            hdg = ap.heading_of_end(end);
+            sim.place_on_water();
+        }
+        weather_fx::apply_preset(&mut sim, self.preset, ap.lat, self.day, Some(hdg));
+        sim.controls.parking_brake = !on_water;
         self.sim = sim;
         self.airport = idx;
         self.flap_idx = 0;
         self.flyby = None;
         self.td_played = 0.0;
+        self.blackbox.clear();
+        self.replay = None;
+    }
+
+    // ------------------------------------------------------------ 黑匣子回放
+
+    /// 开始回放（需要至少两帧记录）。
+    pub fn start_replay(&mut self) -> bool {
+        if self.replay.is_some() || self.blackbox.len() < 2 {
+            return false;
+        }
+        self.replay = Some(Replay { t: self.blackbox.start_time(), saved: self.sim.state.clone(), saved_diag: self.sim.diag.clone() });
+        self.apply_replay_sample();
+        true
+    }
+
+    pub fn stop_replay(&mut self) {
+        if let Some(r) = self.replay.take() {
+            self.sim.state = r.saved;
+            self.sim.diag = r.saved_diag;
+        }
+    }
+
+    /// 回放时间推进（dt 可为负以倒带）；到达末尾自动结束并恢复实时状态。
+    pub fn replay_tick(&mut self, dt: f64) {
+        let end = self.blackbox.start_time() + self.blackbox.duration();
+        let start = self.blackbox.start_time();
+        let Some(r) = self.replay.as_mut() else { return };
+        r.t = (r.t + dt).max(start);
+        if r.t >= end {
+            self.stop_replay();
+            return;
+        }
+        self.apply_replay_sample();
+    }
+
+    fn apply_replay_sample(&mut self) {
+        let Some(t) = self.replay.as_ref().map(|r| r.t) else { return };
+        let Some(p) = self.blackbox.at(t) else { return };
+        let st = &mut self.sim.state;
+        st.rigid.pos = glam::DVec3::new(p.pos[0], p.pos[1], p.pos[2]);
+        st.rigid.q = glam::DQuat::from_xyzw(p.q[0], p.q[1], p.q[2], p.q[3]);
+        st.rigid.vel = glam::DVec3::ZERO;
+        let d = &mut self.sim.diag;
+        d.ias = p.ias_kt * KT;
+        d.ias_true = d.ias;
+        d.vertical_speed = p.vs_mps;
+        d.heading = p.heading;
+        d.pitch = p.pitch;
+        d.roll = p.roll;
+        d.nz = p.nz;
+        d.aoa = p.aoa_deg.to_radians();
     }
 
     pub fn respawn(&mut self) {
@@ -158,8 +295,14 @@ impl GameState {
 fn step_sim(mut game: ResMut<GameState>, time: Res<Time>) {
     if game.screen == Screen::Flight && !game.paused {
         let dt = time.delta_secs_f64().min(0.1);
-        game.sim.advance(dt);
-        game.time += dt;
+        if game.replay.is_some() {
+            game.replay_tick(dt);
+        } else {
+            game.sim.advance(dt);
+            game.time += dt;
+            let g = &mut *game;
+            g.blackbox.record(&g.sim);
+        }
     }
 }
 
@@ -332,7 +475,12 @@ fn main() {
     let day: f64 = arg("--day").and_then(|s| s.parse().ok()).unwrap_or(120.0);
     let hour: f64 = arg("--hour").and_then(|s| s.parse().ok()).unwrap_or(10.0);
     let icao = arg("--icao");
-    let game = GameState::new(seed, icao.as_deref(), day, hour);
+    let aircraft = arg("--aircraft").unwrap_or_else(|| "SKY-172".to_string());
+    let mut game = GameState::new_with(seed, icao.as_deref(), day, hour, &aircraft);
+    // 默认进入开始菜单；--fly 直接起飞
+    if !args.iter().any(|a| a == "--fly") {
+        game.screen = Screen::Menu;
+    }
     println!("STRATO-32  seed {seed}  {} airports  start {}", game.world.airports().len(), game.world.airports()[game.airport].icao);
 
     App::new()
@@ -353,6 +501,7 @@ fn main() {
             weather_fx::WeatherFxPlugin,
             audio::AudioPlugin,
             map_screen::MapPlugin,
+            menu::MenuPlugin,
         ))
         .insert_resource(game)
         .insert_resource(HudBuffer(PixelBuffer::new()))

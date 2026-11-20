@@ -37,6 +37,15 @@ pub struct AirportVisuals {
     spawned: HashMap<usize, Entity>,
 }
 
+impl AirportVisuals {
+    /// 世界重新生成时销毁全部机场实体（下一帧按新世界重建）。
+    pub fn clear_all(&mut self, commands: &mut Commands) {
+        for (_, e) in self.spawned.drain() {
+            commands.entity(e).despawn();
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct AirportAssets {
     lit: Handle<StandardMaterial>,
