@@ -15,6 +15,7 @@ pub fn read_input(
     mut game: ResMut<GameState>,
     time: Res<Time>,
     menu: Option<ResMut<crate::menu::MenuState>>,
+    touch: Option<Res<crate::touch_ui::TouchAxes>>,
 ) {
     let dt = time.delta_secs_f64();
     // Tab：开始菜单（选机型 / 机场 / 天气 / 季节 / 种子）
@@ -47,7 +48,7 @@ pub fn read_input(
         }
     }
     if keys.just_pressed(KeyCode::F5) {
-        let _ = std::fs::write("blackbox.csv", game.blackbox.to_csv());
+        let _ = std::fs::write(export_path("blackbox.csv"), game.blackbox.to_csv());
     }
     if game.replay.is_some() {
         if keys.just_pressed(KeyCode::ArrowLeft) {
@@ -75,6 +76,15 @@ pub fn read_input(
     let mut pitch = ax(KeyCode::KeyW, KeyCode::KeyS) + ax(KeyCode::ArrowUp, KeyCode::ArrowDown);
     let mut roll = ax(KeyCode::KeyA, KeyCode::KeyD) + ax(KeyCode::ArrowLeft, KeyCode::ArrowRight);
     let mut yaw = ax(KeyCode::KeyQ, KeyCode::KeyE);
+
+    // 触控虚拟摇杆（模拟量）覆盖键盘数字量（无头测试里没有该资源）
+    let touch = touch.map(|t| *t).unwrap_or_default();
+    if touch.pitch != 0.0 {
+        pitch = touch.pitch;
+    }
+    if touch.roll != 0.0 {
+        roll = touch.roll;
+    }
 
     let mut throttle_delta = 0.0;
     if keys.pressed(KeyCode::ShiftLeft) {
@@ -130,6 +140,9 @@ pub fn read_input(
     c.roll = roll.clamp(-1.0, 1.0);
     c.yaw = yaw.clamp(-1.0, 1.0);
     c.throttle = (c.throttle + throttle_delta).clamp(0.0, 1.0);
+    if let Some(t) = touch.throttle {
+        c.throttle = t; // 触控油门滑杆（绝对值）
+    }
     c.flaps = flap_target;
     if gear_toggle {
         c.gear_down = !c.gear_down;
@@ -165,4 +178,17 @@ pub fn read_input(
     if keys.just_pressed(KeyCode::Backspace) {
         game.respawn();
     }
+}
+
+/// 导出文件路径：Android 上工作目录不可写，改用应用私有目录；桌面保持当前目录。
+fn export_path(name: &str) -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        if let Some(app) = bevy::android::ANDROID_APP.get() {
+            if let Some(dir) = app.external_data_path().or_else(|| app.internal_data_path()) {
+                return dir.join(name);
+            }
+        }
+    }
+    std::path::PathBuf::from(name)
 }

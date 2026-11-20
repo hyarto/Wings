@@ -3,6 +3,13 @@ name = "app_client"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "app_client"
+path = "src/main.rs"
+
 [features]
 # 开发期动态链接加速编译：cargo run -p app_client --features dev
 dev = ["bevy/dynamic_linking"]
@@ -14,3 +21,7 @@ world_gen = { path = "../world_gen" }
 # 音频解码线程会 panic: UnrecognizedFormat
 bevy = { version = "0.18", features = ["wav"] }
 glam = { workspace = true }
+
+# Android：GameActivity 后端（仅在目标为 android 时启用；见 android/ 与 docs/ANDROID_PORT.md）
+[target.'cfg(target_os = "android")'.dependencies]
+bevy = { version = "0.18", features = ["wav", "android-game-activity"] }

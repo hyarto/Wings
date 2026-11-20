@@ -1,2 +1,3 @@
 /target
 *.log
+/android/local.properties

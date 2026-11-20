@@ -26,3 +26,10 @@ opt-level = 3
 [profile.release]
 opt-level = 3
 codegen-units = 4
+
+# Android 发布：体积优先，符号剥离（cargo build --profile android ...）
+[profile.android]
+inherits = "release"
+opt-level = 3
+strip = "symbols"
+lto = "off"

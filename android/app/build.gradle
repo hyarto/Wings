@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+// 发布签名：读取 android/keystore.properties（不入库，见 README）。缺失时回退到 debug 签名，保证本地也能出可安装包。
+def ksProps = new Properties()
+def ksFile = rootProject.file('keystore.properties')
+if (ksFile.exists()) ksFile.withInputStream { ksProps.load(it) }
+
+android {
+    namespace 'com.hyarto.wings'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.hyarto.wings"
+        minSdk 28
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+        // 仅 arm64-v8a（libapp_client.so + libc++_shared.so 由 cargo-ndk 放入 src/main/jniLibs）
+        ndk { abiFilters 'arm64-v8a' }
+    }
+
+    signingConfigs {
+        if (ksFile.exists()) {
+            release {
+                storeFile rootProject.file(ksProps['storeFile'])
+                storePassword ksProps['storePassword']
+                keyAlias ksProps['keyAlias']
+                keyPassword ksProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig ksFile.exists() ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    packagingOptions {
+        jniLibs {
+            // .so 已 strip；让 APK 内压缩存放，体积更小（minSdk>=23 可选择不解压运行）
+            useLegacyPackaging = true
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.games:games-activity:2.0.2'
+}
