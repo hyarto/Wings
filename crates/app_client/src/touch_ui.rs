@@ -593,3 +593,149 @@ impl Plugin for TouchUiPlugin {
             .add_systems(Update, (draw_touch_ui, lifecycle_system));
     }
 }
+
+// ----------------------------------------------------------------------------- 测试（无头）
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::input::touch::{TouchInput, TouchPhase};
+    use bevy::input::InputPlugin;
+
+    const SIZES: [(f32, f32); 5] = [(800.0, 360.0), (915.0, 412.0), (640.0, 360.0), (960.0, 480.0), (2400.0, 1080.0)];
+
+    fn overlap(a: R, b: R) -> bool {
+        a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+    }
+
+    #[test]
+    fn stick_curve_has_deadzone_and_is_monotonic() {
+        assert_eq!(stick_curve(0.0), 0.0);
+        assert_eq!(stick_curve(0.05), 0.0);
+        assert!((stick_curve(1.0) - 1.0).abs() < 1e-6 && (stick_curve(-1.0) + 1.0).abs() < 1e-6);
+        let mut last = 0.0;
+        for i in 8..=100 {
+            let v = stick_curve(i as f32 / 100.0);
+            assert!(v >= last);
+            last = v;
+        }
+        assert!(stick_curve(0.5) < 0.5, "指数曲线：中段灵敏度低于线性");
+    }
+
+    #[test]
+    fn layout_fits_and_does_not_overlap() {
+        for (w, h) in SIZES {
+            let win = Vec2::new(w, h);
+            let sl = slider_rect(win);
+            assert!(sl.x > 0.0 && sl.x + sl.w < w && sl.y > 0.0 && sl.y + sl.h < h, "slider off-screen {w}x{h}");
+            for ctx in [Ctx::Flight, Ctx::Replay, Ctx::Map, Ctx::Menu] {
+                for more in [false, true] {
+                    let vis: Vec<(usize, R)> = BTNS.iter().enumerate().filter(|(_, s)| visible(s, ctx, more)).map(|(i, s)| (i, spec_rect(s, win))).collect();
+                    for (i, r) in &vis {
+                        assert!(r.x >= 0.0 && r.y >= 0.0 && r.x + r.w <= w && r.y + r.h <= h, "{} off-screen at {w}x{h}", BTNS[*i].label);
+                        if ctx == Ctx::Flight {
+                            assert!(!overlap(*r, sl), "{} overlaps throttle slider at {w}x{h}", BTNS[*i].label);
+                        }
+                    }
+                    for (a, (i, ra)) in vis.iter().enumerate() {
+                        for (j, rb) in vis.iter().skip(a + 1) {
+                            assert!(!overlap(*ra, *rb), "{} overlaps {} ({ctx:?}/{more}) at {w}x{h}", BTNS[*i].label, BTNS[*j].label, ctx = ctx as u8);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn app() -> (App, Entity) {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, InputPlugin));
+        let win = app.world_mut().spawn((Window { resolution: (800u32, 360u32).into(), ..default() }, PrimaryWindow)).id();
+        app.insert_resource(GameState::new(32, None, 120.0, 10.0));
+        app.init_resource::<TouchAxes>();
+        app.insert_resource(TouchUi { enabled: true, ..default() });
+        app.add_systems(PreUpdate, touch_input_system.after(InputSystems));
+        app.add_systems(Update, crate::input::read_input);
+        app.update();
+        (app, win)
+    }
+
+    fn touch(app: &mut App, win: Entity, phase: TouchPhase, id: u64, p: Vec2) {
+        app.world_mut().write_message(TouchInput { phase, position: p, window: win, force: None, id });
+        app.update();
+    }
+
+    fn center(label: &str, ctx: Ctx) -> Vec2 {
+        let s = BTNS.iter().find(|s| s.label == label && s.ctx & (ctx.bit() | C_PANEL) != 0).expect("button");
+        let r = spec_rect(s, Vec2::new(800.0, 360.0));
+        Vec2::new(r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    #[test]
+    fn tap_gear_and_hold_brake_via_touch() {
+        let (mut app, win) = app();
+        let g0 = app.world().resource::<GameState>().sim.controls.gear_down;
+        let p = center("GEAR", Ctx::Flight);
+        touch(&mut app, win, TouchPhase::Started, 1, p);
+        assert_ne!(app.world().resource::<GameState>().sim.controls.gear_down, g0, "GEAR 点按应切换起落架");
+        touch(&mut app, win, TouchPhase::Ended, 1, p);
+        app.update();
+        assert_ne!(app.world().resource::<GameState>().sim.controls.gear_down, g0, "抬手后不应再次切换");
+
+        let p = center("BRAKE", Ctx::Flight);
+        touch(&mut app, win, TouchPhase::Started, 2, p);
+        app.update();
+        assert_eq!(app.world().resource::<GameState>().sim.controls.brake_left, 1.0);
+        touch(&mut app, win, TouchPhase::Ended, 2, p);
+        app.update();
+        assert_eq!(app.world().resource::<GameState>().sim.controls.brake_left, 0.0);
+    }
+
+    #[test]
+    fn throttle_slider_is_absolute() {
+        let (mut app, win) = app();
+        let sl = slider_rect(Vec2::new(800.0, 360.0));
+        let x = sl.x + sl.w / 2.0;
+        touch(&mut app, win, TouchPhase::Started, 1, Vec2::new(x, sl.y + 1.0));
+        app.update();
+        assert!(app.world().resource::<GameState>().sim.controls.throttle > 0.98);
+        touch(&mut app, win, TouchPhase::Moved, 1, Vec2::new(x, sl.y + sl.h * 0.5));
+        assert!((app.world().resource::<GameState>().sim.controls.throttle - 0.5).abs() < 0.03);
+        touch(&mut app, win, TouchPhase::Ended, 1, Vec2::new(x, sl.y + sl.h * 0.5));
+        app.update();
+        assert!((app.world().resource::<GameState>().sim.controls.throttle - 0.5).abs() < 0.03, "抬手后油门保持");
+    }
+
+    #[test]
+    fn floating_stick_drives_pitch_and_roll() {
+        let (mut app, win) = app();
+        let o = Vec2::new(150.0, 250.0);
+        touch(&mut app, win, TouchPhase::Started, 1, o);
+        touch(&mut app, win, TouchPhase::Moved, 1, o + Vec2::new(60.0, 60.0));
+        app.update();
+        let c = app.world().resource::<GameState>().sim.controls;
+        assert!(c.roll > 0.5, "向右拖 = 右滚: {}", c.roll);
+        assert!(c.pitch > 0.5, "向下拖 = 拉杆: {}", c.pitch);
+        touch(&mut app, win, TouchPhase::Ended, 1, o);
+        app.update();
+        let c = app.world().resource::<GameState>().sim.controls;
+        assert_eq!((c.roll, c.pitch), (0.0, 0.0), "抬手回中");
+    }
+
+    #[test]
+    fn more_panel_toggles_and_menu_button_switches_screen() {
+        let (mut app, win) = app();
+        let p = center("MORE", Ctx::Flight);
+        touch(&mut app, win, TouchPhase::Started, 1, p);
+        touch(&mut app, win, TouchPhase::Ended, 1, p);
+        assert!(app.world().resource::<TouchUi>().more);
+        let pk = center("PARK", Ctx::Flight); // 面板内按钮
+        let before = app.world().resource::<GameState>().sim.controls.parking_brake;
+        touch(&mut app, win, TouchPhase::Started, 2, pk);
+        touch(&mut app, win, TouchPhase::Ended, 2, pk);
+        assert_ne!(app.world().resource::<GameState>().sim.controls.parking_brake, before);
+        let m = center("MENU", Ctx::Flight);
+        touch(&mut app, win, TouchPhase::Started, 3, m);
+        assert_eq!(app.world().resource::<GameState>().screen, Screen::Menu);
+    }
+}

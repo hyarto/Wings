@@ -11,7 +11,7 @@
 [Windows x86_64 (`v0.1.0-windows`)](https://github.com/hyarto/Wings/releases/tag/v0.1.0-windows) ·
 [Linux x86_64 (`v0.1.0-linux`)](https://github.com/hyarto/Wings/releases/tag/v0.1.0-linux)
 
-Android 移植可行性评估（已用 NDK 实际交叉编译验证）：[docs/ANDROID_PORT_ASSESSMENT.md](docs/ANDROID_PORT_ASSESSMENT.md)
+Android：移植可行性评估 [docs/ANDROID_PORT_ASSESSMENT.md](docs/ANDROID_PORT_ASSESSMENT.md) · **移植实现与构建说明 [docs/ANDROID_PORT.md](docs/ANDROID_PORT.md)**（arm64-v8a APK 见 Releases `v0.1.0-android`，构建：`android/build.sh`）
 
 ## 运行
 
