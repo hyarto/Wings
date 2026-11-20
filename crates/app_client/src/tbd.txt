@@ -1,0 +1,3024 @@
+//! SKY-172 程序化低多边形 3D 模型（外部视角可见），含舵面/螺旋桨动画与起落架。
+
+use crate::mesh_util::MeshBuilder;
+use crate::origin::FloatingOrigin;
+use crate::GameState;
+use bevy::prelude::*;
+
+#[derive(Component)]
+pub struct AircraftRoot;
+#[derive(Component)]
+pub struct Propeller;
+#[derive(Component)]
+pub enum ControlSurface {
+    AileronL,
+    AileronR,
+    Elevator,
+    Rudder,
+}
+
+const WHITE: [f32; 4] = [0.93, 0.93, 0.9, 1.0];
+const RED: [f32; 4] = [0.78, 0.1, 0.1, 1.0];
+const DARK: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
+const GLASS: [f32; 4] = [0.25, 0.4, 0.55, 1.0];
+
+fn body_mesh() -> Mesh {
+    let mut m = MeshBuilder::new();
+    // 机身：驾驶舱 + 机头 + 尾锥
+    m.aabb(Vec3::new(0.0, 0.0, 0.2), Vec3::new(0.55, 0.62, 1.5), WHITE);
+    m.aabb(Vec3::new(0.0, 0.7, -0.3), Vec3::new(0.5, 0.18, 0.7), GLASS);
+    m.aabb(Vec3::new(0.0, -0.05, -1.9), Vec3::new(0.46, 0.5, 0.8), WHITE);
+    m.aabb(Vec3::new(0.0, -0.0, -2.75), Vec3::new(0.3, 0.3, 0.1), DARK);
+    m.aabb(Vec3::new(0.0, 0.08, 2.45), Vec3::new(0.38, 0.42, 1.0), WHITE);
+    m.aabb(Vec3::new(0.0, 0.2, 4.0), Vec3::new(0.2, 0.25, 1.1), WHITE);
+    m.aabb(Vec3::new(0.0, 0.1, 1.2), Vec3::new(0.56, 0.1, 3.5), RED); // 腰线
+    // 主翼（高翼）+ 撑杆
+    m.aabb(Vec3::new(0.0, 0.82, 0.1), Vec3::new(5.5, 0.07, 0.75), WHITE);
+    for s in [-1.0f32, 1.0] {
+        m.cuboid(Vec3::new(s * 2.3, 0.35, 0.1), Vec3::new(0.05, 0.62, 0.05), Quat::from_rotation_z(-s * 0.9), DARK);
+        m.aabb(Vec3::new(s * 5.45, 0.82, 0.1), Vec3::new(0.12, 0.08, 0.7), RED);
+    }
+    // 水平/垂直尾翼（固定部分）
+    m.aabb(Vec3::new(0.0, 0.42, 4.55), Vec3::new(1.8, 0.04, 0.35), WHITE);
+    m.aabb(Vec3::new(0.0, 0.95, 4.6), Vec3::new(0.04, 0.6, 0.4), WHITE);
+    m.aabb(Vec3::new(0.0, 1.5, 4.7), Vec3::new(0.05, 0.1, 0.3), RED);
+    // 起落架（固定）
+    m.aabb(Vec3::new(0.0, -0.75, -1.35), Vec3::new(0.04, 0.3, 0.04), DARK);
+    m.aabb(Vec3::new(0.0, -1.0, -1.35), Vec3::new(0.06, 0.16, 0.16), DARK);
+    for s in [-1.0f32, 1.0] {
+        m.cuboid(Vec3::new(s * 0.95, -0.72, 0.35), Vec3::new(0.04, 0.55, 0.04), Quat::from_rotation_z(s * 0.7), WHITE);
+        m.aabb(Vec3::new(s * 1.25, -0.92, 0.35), Vec3::new(0.07, 0.17, 0.17), DARK);
+    }
+    m.build()
+}
+
+fn prop_mesh() -> Mesh {
+    let mut m = MeshBuilder::new();
+    m.aabb(Vec3::ZERO, Vec3::new(0.07, 0.95, 0.025), DARK);
+    m.aabb(Vec3::ZERO, Vec3::new(0.95, 0.07, 0.025), DARK);
+    m.aabb(Vec3::new(0.0, 0.0, -0.05), Vec3::new(0.12, 0.12, 0.12), RED);
+    m.build()
+}
+
+fn surface_mesh(half: Vec3, offset: Vec3, col: [f32; 4]) -> Mesh {
+    let mut m = MeshBuilder::new();
+    m.aabb(offset, half, col);
+    m.build()
+}
+
+pub fn spawn_aircraft(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>) {
+    let mat = mats.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 0.8, reflectance: 0.2, ..default() });
+    let root = commands.spawn((Transform::default(), Visibility::Hidden, AircraftRoot)).id();
+    let body = commands.spawn((Mesh3d(meshes.add(body_mesh())), MeshMaterial3d(mat.clone()), Transform::default())).id();
+    let prop = commands.spawn((Mesh3d(meshes.add(prop_mesh())), MeshMaterial3d(mat.clone()), Transform::from_xyz(0.0, 0.0, -2.9), Propeller)).id();
+    // 舵面：铰链在前缘，网格向后偏移
+    let ail_l = commands
+        .spawn((Mesh3d(meshes.add(surface_mesh(Vec3::new(1.4, 0.04, 0.2), Vec3::new(0.0, 0.0, 0.2), RED))), MeshMaterial3d(mat.clone()), Transform::from_xyz(-3.9, 0.82, 0.8), ControlSurface::AileronL))
+        .id();
+    let ail_r = commands
+        .spawn((Mesh3d(meshes.add(surface_mesh(Vec3::new(1.4, 0.04, 0.2), Vec3::new(0.0, 0.0, 0.2), RED))), MeshMaterial3d(mat.clone()), Transform::from_xyz(3.9, 0.82, 0.8), ControlSurface::AileronR))
+        .id();
+    let elev = commands
+        .spawn((Mesh3d(meshes.add(surface_mesh(Vec3::new(1.75, 0.035, 0.22), Vec3::new(0.0, 0.0, 0.22), WHITE))), MeshMaterial3d(mat.clone()), Transform::from_xyz(0.0, 0.42, 4.88), ControlSurface::Elevator))
+        .id();
+    let rud = commands
+        .spawn((Mesh3d(meshes.add(surface_mesh(Vec3::new(0.035, 0.55, 0.2), Vec3::new(0.0, 0.0, 0.2), WHITE))), MeshMaterial3d(mat.clone()), Transform::from_xyz(0.0, 0.95, 5.0), ControlSurface::Rudder))
+        .id();
+    commands.entity(root).add_children(&[body, prop, ail_l, ail_r, elev, rud]);
+}
+
+pub fn update_aircraft(
+    game: Res<GameState>,
+    origin: Res<FloatingOrigin>,
+    mut root: Query<(&mut Transform, &mut Visibility), (With<AircraftRoot>, Without<Propeller>, Without<ControlSurface>)>,
+    mut prop: Query<&mut Transform, (With<Propeller>, Without<ControlSurface>, Without<AircraftRoot>)>,
+    mut surf: Query<(&ControlSurface, &mut Transform), (Without<Propeller>, Without<AircraftRoot>)>,
+    time: Res<Time>,
+) {
+    let s = &game.sim.state;
+    if let Ok((mut t, mut v)) = root.single_mut() {
+        let p = s.rigid.pos;
+        t.translation = Vec3::new((p.x - origin.0.x) as f32, (p.y - origin.0.y) as f32, (p.z - origin.0.z) as f32);
+        let q = s.rigid.q;
+        t.rotation = Quat::from_xyzw(q.x as f32, q.y as f32, q.z as f32, q.w as f32);
+        *v = if matches!(game.view, crate::cockpit_ui::ViewMode::Chase | crate::cockpit_ui::ViewMode::Flyby) && game.screen == crate::Screen::Flight {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+    }
+    let rpm = s.engines.first().map(|e| e.rpm).unwrap_or(0.0) as f32;
+    for mut t in &mut prop {
+        // 转速过高时以 0.5 弧度/帧限制频闪
+        let w = (rpm / 60.0 * std::f32::consts::TAU).min(80.0);
+        t.rotate_local_z(w * time.delta_secs());
+    }
+    let sf = s.surfaces;
+    for (c, mut t) in &mut surf {
+        t.rotation = match c {
+            ControlSurface::AileronL => Quat::from_rotation_x(-(sf.aileron as f32) * 0.35),
+            ControlSurface::AileronR => Quat::from_rotation_x((sf.aileron as f32) * 0.35),
+            ControlSurface::Elevator => Quat::from_rotation_x((sf.elevator as f32) * 0.4),
+            ControlSurface::Rudder => Quat::from_rotation_y((sf.rudder as f32) * 0.4),
+        };
+    }
+}
+
+pub struct AircraftMeshPlugin;
+impl Plugin for AircraftMeshPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, spawn_aircraft).add_systems(Update, update_aircraft);
+    }
+}
+
+
+---
+
+//! 程序化机场：跑道标线、边灯、PAPI 灯、风向袋、低模塔台/机库。
+//! 机场实体锚定在 f64 世界坐标，由 Floating Origin 同步到渲染坐标。
+
+use crate::mesh_util::{rgba, MeshBuilder};
+use crate::origin::WorldAnchor;
+use crate::GameState;
+use bevy::math::DVec3;
+use bevy::prelude::*;
+use std::collections::HashMap;
+use world_gen::airport::Airport;
+use world_gen::coords::wrapped_dx;
+
+const SPAWN_RADIUS: f64 = 38_000.0;
+const DESPAWN_RADIUS: f64 = 55_000.0;
+
+#[derive(Component)]
+pub struct AirportRoot {
+    pub index: usize,
+    /// 机场锚点（f64 世界坐标，已展开经度环绕）。
+    pub anchor: DVec3,
+}
+
+#[derive(Component)]
+pub struct PapiLight {
+    pub index: usize,
+    pub end: usize,
+    pub slot: usize,
+    pub local: Vec3,
+    pub anchor: DVec3,
+}
+
+#[derive(Component)]
+pub struct Windsock;
+
+#[derive(Resource, Default)]
+pub struct AirportVisuals {
+    spawned: HashMap<usize, Entity>,
+}
+
+#[derive(Resource)]
+pub struct AirportAssets {
+    lit: Handle<StandardMaterial>,
+    unlit: Handle<StandardMaterial>,
+    white: Handle<StandardMaterial>,
+    red: Handle<StandardMaterial>,
+    cube: Handle<Mesh>,
+    sock: Handle<Mesh>,
+}
+
+fn setup_assets(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>) {
+    let lit = mats.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 1.0, reflectance: 0.05, ..default() });
+    let unlit = mats.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() });
+    let white = mats.add(StandardMaterial { base_color: Color::srgb(1.0, 1.0, 0.95), unlit: true, ..default() });
+    let red = mats.add(StandardMaterial { base_color: Color::srgb(1.0, 0.1, 0.05), unlit: true, ..default() });
+    let cube = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    // 风向袋：沿局部 -Z 方向的锥
+    let mut sb = MeshBuilder::new();
+    let (len, r) = (3.5f32, 0.7f32);
+    let n = 6;
+    for i in 0..n {
+        let (a0, a1) = (i as f32 / n as f32 * std::f32::consts::TAU, (i + 1) as f32 / n as f32 * std::f32::consts::TAU);
+        let c = if i % 2 == 0 { [1.0, 0.45, 0.05, 1.0] } else { [1.0, 1.0, 1.0, 1.0] };
+        let (p0, p1) = (Vec3::new(a0.cos() * r, a0.sin() * r, 0.0), Vec3::new(a1.cos() * r, a1.sin() * r, 0.0));
+        let tip = Vec3::new(0.0, 0.0, -len);
+        let small = 0.25;
+        let (q0, q1) = (Vec3::new(a0.cos() * small, a0.sin() * small, -len), Vec3::new(a1.cos() * small, a1.sin() * small, -len));
+        let _ = tip;
+        sb.quad(p0, q0, q1, p1, c);
+        sb.quad(p1, q1, q0, p0, c);
+    }
+    let sock = meshes.add(sb.build());
+    commands.insert_resource(AirportAssets { lit, unlit, white, red, cube, sock });
+}
+
+/// 跑道局部点（相对机场中心；x 东，z 南），沿跑道距离 `along`（自端 0），横向 `lat`（右为正）。
+fn lp(ap: &Airport, along: f64, lat: f64, y: f32) -> Vec3 {
+    let (dx, dz) = ap.dir0();
+    let a = along - ap.length / 2.0;
+    Vec3::new((dx * a - dz * lat) as f32, y, (dz * a + dx * lat) as f32)
+}
+
+fn flat_quad(mb: &mut MeshBuilder, ap: &Airport, a0: f64, a1: f64, l0: f64, l1: f64, y: f32, col: [f32; 4]) {
+    // 顺序保证法线朝上（+Y）
+    let (p00, p10, p11, p01) = (lp(ap, a0, l0, y), lp(ap, a1, l0, y), lp(ap, a1, l1, y), lp(ap, a0, l1, y));
+    let n = (p10 - p00).cross(p01 - p00);
+    if n.y >= 0.0 {
+        mb.quad(p00, p10, p11, p01, col);
+    } else {
+        mb.quad(p00, p01, p11, p10, col);
+    }
+}
+
+fn build_airport_meshes(ap: &Airport) -> (MeshBuilder, MeshBuilder) {
+    let mut ground = MeshBuilder::new();
+    let mut lights = MeshBuilder::new();
+    let hw = ap.width / 2.0;
+    let l = ap.length;
+    let surf = if ap.asphalt { [0.15, 0.15, 0.17, 1.0] } else { [0.45, 0.35, 0.22, 1.0] };
+    // 路面
+    flat_quad(&mut ground, ap, 0.0, l, -hw, hw, 0.12, surf);
+    // 土路跑道两侧压实带
+    if !ap.asphalt {
+        flat_quad(&mut ground, ap, -20.0, l + 20.0, -hw - 4.0, hw + 4.0, 0.08, [0.38, 0.45, 0.2, 1.0]);
+    }
+    let white = [0.95, 0.95, 0.95, 1.0];
+    if ap.asphalt {
+        // 中线虚线
+        let mut a = 60.0;
+        while a + 24.0 < l - 60.0 {
+            flat_quad(&mut ground, ap, a, a + 24.0, -0.5, 0.5, 0.16, white);
+            a += 48.0;
+        }
+        // 入口标线 & 接地区标线 & 边线
+        for end in 0..2 {
+            let s = if end == 0 { 1.0 } else { -1.0 };
+            let base = if end == 0 { 0.0 } else { l };
+            for k in 0..8 {
+                let lat = -hw * 0.8 + k as f64 * (hw * 1.6 / 7.0);
+                flat_quad(&mut ground, ap, base + s * 8.0, base + s * 38.0, lat - 0.8, lat + 0.8, 0.16, white);
+            }
+            for dist in [150.0, 300.0, 450.0] {
+                for side in [-1.0, 1.0] {
+                    flat_quad(&mut ground, ap, base + s * dist, base + s * (dist + 22.0), side * hw * 0.35 - 1.2, side * hw * 0.35 + 1.2, 0.16, white);
+                }
+            }
+        }
+        flat_quad(&mut ground, ap, 0.0, l, -hw + 0.5, -hw + 1.0, 0.16, white);
+        flat_quad(&mut ground, ap, 0.0, l, hw - 1.0, hw - 0.5, 0.16, white);
+        // 滑行道与停机坪
+        let apron = [0.22, 0.22, 0.24, 1.0];
+        flat_quad(&mut ground, ap, l * 0.5 - 90.0, l * 0.5 + 90.0, hw + 40.0, hw + 100.0, 0.1, apron);
+        flat_quad(&mut ground, ap, l * 0.5 - 12.0, l * 0.5 + 12.0, hw, hw + 40.0, 0.1, apron);
+    } else {
+        flat_quad(&mut ground, ap, l * 0.5 - 40.0, l * 0.5 + 40.0, hw + 30.0, hw + 60.0, 0.1, [0.5, 0.4, 0.28, 1.0]);
+    }
+    // 塔台与机库
+    let (tx, tz) = {
+        let p = lp(ap, l * 0.5, hw + 110.0, 0.0);
+        (p.x, p.z)
+    };
+    if ap.asphalt {
+        ground.aabb(Vec3::new(tx, 7.0, tz), Vec3::new(2.5, 7.0, 2.5), [0.75, 0.75, 0.78, 1.0]);
+        ground.aabb(Vec3::new(tx, 15.5, tz), Vec3::new(4.0, 1.8, 4.0), [0.3, 0.45, 0.55, 1.0]);
+        ground.aabb(Vec3::new(tx, 17.8, tz), Vec3::new(4.6, 0.4, 4.6), [0.5, 0.5, 0.52, 1.0]);
+        for k in 0..3 {
+            let p = lp(ap, l * 0.5 - 60.0 + k as f64 * 60.0, hw + 150.0, 0.0);
+            ground.aabb(Vec3::new(p.x, 5.0, p.z), Vec3::new(18.0, 5.0, 14.0), [0.55, 0.58, 0.6, 1.0]);
+        }
+    } else {
+        let p = lp(ap, l * 0.5, hw + 45.0, 0.0);
+        ground.aabb(Vec3::new(p.x, 3.0, p.z), Vec3::new(6.0, 3.0, 4.0), [0.5, 0.25, 0.2, 1.0]);
+    }
+    // 风向袋杆
+    let sp = lp(ap, 250.0, hw + 40.0, 0.0);
+    ground.aabb(Vec3::new(sp.x, 3.0, sp.z), Vec3::new(0.12, 3.0, 0.12), [0.9, 0.9, 0.9, 1.0]);
+
+    // 边灯（60 m 间隔）、末端灯（红/绿）
+    for (a, b) in ap.edge_lights().into_iter().zip(std::iter::repeat(())) {
+        let _ = b;
+        let p = Vec3::new(((a.0 - ap.center.0) as f32 + 0.0) * 0.0, 0.0, 0.0);
+        let _ = p;
+    }
+    let n = (l / 60.0).floor() as i32;
+    for i in 0..=n {
+        let a = i as f64 * l / n as f64;
+        let amber = a > l - 600.0 || a < 0.5;
+        let c = if amber { [1.0, 0.8, 0.2, 1.0] } else { [1.0, 1.0, 0.95, 1.0] };
+        for side in [-1.0, 1.0] {
+            let p = lp(ap, a, side * (hw + 2.0), 0.55);
+            lights.aabb(p, Vec3::splat(0.35), c);
+        }
+    }
+    for k in -4..=4 {
+        let lat = k as f64 * (ap.width / 8.0);
+        lights.aabb(lp(ap, -1.0, lat, 0.4), Vec3::new(0.3, 0.3, 0.3), [0.1, 1.0, 0.2, 1.0]);
+        lights.aabb(lp(ap, l + 1.0, lat, 0.4), Vec3::new(0.3, 0.3, 0.3), [1.0, 0.1, 0.1, 1.0]);
+    }
+    let _ = rgba;
+    (ground, lights)
+}
+
+fn manage_airports(
+    mut commands: Commands,
+    game: Res<GameState>,
+    assets: Option<Res<AirportAssets>>,
+    mut vis: ResMut<AirportVisuals>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(assets) = assets else { return };
+    let ac = game.sim.state.rigid.pos;
+    let aps = game.world.airports();
+    // 卸载
+    let far: Vec<usize> = vis
+        .spawned
+        .keys()
+        .copied()
+        .filter(|&i| {
+            let a = &aps[i];
+            let dx = wrapped_dx(ac.x, a.center.0);
+            dx.hypot(a.center.1 - ac.z) > DESPAWN_RADIUS
+        })
+        .collect();
+    for i in far {
+        if let Some(e) = vis.spawned.remove(&i) {
+            commands.entity(e).despawn();
+        }
+    }
+    // 加载
+    for (i, a) in aps.iter().enumerate() {
+        if vis.spawned.contains_key(&i) {
+            continue;
+        }
+        let dx = wrapped_dx(ac.x, a.center.0);
+        if dx.hypot(a.center.1 - ac.z) > SPAWN_RADIUS {
+            continue;
+        }
+        let anchor = DVec3::new(ac.x + dx, a.elevation, a.center.1);
+        let (g, l) = build_airport_meshes(a);
+        let root = commands
+            .spawn((Transform::default(), Visibility::default(), WorldAnchor(anchor), AirportRoot { index: i, anchor }))
+            .id();
+        let g_ent = commands.spawn((Mesh3d(meshes.add(g.build())), MeshMaterial3d(assets.lit.clone()), Transform::default())).id();
+        let l_ent = commands.spawn((Mesh3d(meshes.add(l.build())), MeshMaterial3d(assets.unlit.clone()), Transform::default())).id();
+        commands.entity(root).add_children(&[g_ent, l_ent]);
+        // 风向袋
+        let hw = a.width / 2.0;
+        let sp = lp(a, 250.0, hw + 40.0, 6.2);
+        let sock = commands.spawn((Mesh3d(assets.sock.clone()), MeshMaterial3d(assets.lit.clone()), Transform::from_translation(sp), Windsock)).id();
+        commands.entity(root).add_children(&[sock]);
+        // PAPI（两端各 4 盏）
+        for end in 0..2usize {
+            let papi = a.papi(end);
+            for (slot, p) in papi.positions.iter().enumerate() {
+                let (rx, rz) = (wrapped_dx(a.center.0, p.0), p.1 - a.center.1);
+                let local = Vec3::new(rx as f32, 0.7, rz as f32);
+                let e = commands
+                    .spawn((
+                        Mesh3d(assets.cube.clone()),
+                        MeshMaterial3d(assets.white.clone()),
+                        Transform::from_translation(local).with_scale(Vec3::new(1.4, 0.8, 1.4)),
+                        PapiLight { index: i, end, slot, local, anchor },
+                    ))
+                    .id();
+                commands.entity(root).add_children(&[e]);
+            }
+        }
+        vis.spawned.insert(i, root);
+    }
+}
+
+/// PAPI：以飞机相对灯位的仰角决定红/白（2.5°/2.83°/3.17°/3.5° 阈值，3° 下滑 = 2 红 2 白）。
+fn update_papi(game: Res<GameState>, assets: Option<Res<AirportAssets>>, mut q: Query<(&PapiLight, &mut MeshMaterial3d<StandardMaterial>)>) {
+    let Some(assets) = assets else { return };
+    let ac = game.sim.state.rigid.pos;
+    let aps = game.world.airports();
+    for (p, mut m) in &mut q {
+        let ap = &aps[p.index];
+        let rel = ac - p.anchor;
+        let v = Vec3::new(rel.x as f32, rel.y as f32, rel.z as f32) - p.local;
+        let (ddx, ddz) = ap.landing_dir(p.end);
+        let behind = -(v.x as f64 * ddx + v.z as f64 * ddz);
+        let ang = if behind > 20.0 { (v.y as f64 - 0.7).atan2(behind).to_degrees() } else { 90.0 };
+        let white = ang > 2.5 + 0.333 * p.slot as f64;
+        let want = if white { assets.white.clone() } else { assets.red.clone() };
+        if m.0 != want {
+            m.0 = want;
+        }
+    }
+}
+
+fn update_windsock(game: Res<GameState>, mut q: Query<&mut Transform, With<Windsock>>) {
+    let w = game.sim.weather.wind_at(game.sim.state.rigid.pos, 10.0, game.sim.state.time);
+    let sp = (w.x * w.x + w.z * w.z).sqrt();
+    let dir = if sp > 0.6 { Vec3::new(w.x as f32, -(0.5 - (sp as f32 / 12.0).min(0.5)) * 1.2, w.z as f32).normalize() } else { Vec3::NEG_Y };
+    for mut t in &mut q {
+        t.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, dir);
+    }
+}
+
+pub struct AirportVisualsPlugin;
+impl Plugin for AirportVisualsPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<AirportVisuals>()
+            .add_systems(Startup, setup_assets)
+            .add_systems(Update, (manage_airports, update_papi, update_windsock));
+    }
+}
+
+/// 清空所有机场实体（切换世界/种子时使用）。
+pub fn reset_airports(commands: &mut Commands, vis: &mut AirportVisuals) {
+    for (_, e) in vis.spawned.drain() {
+        commands.entity(e).despawn();
+    }
+}
+
+
+---
+
+//! 程序化音效合成（无外部音频资源）：活塞/涡桨/涡扇引擎、风噪、失速警报、接地音效。
+//! 采样在内存中合成为 16-bit WAV，再交给 bevy_audio 播放；运行时通过 `AudioSink` 调节音调/音量。
+
+use crate::GameState;
+use bevy::audio::{AudioPlayer, AudioSink, AudioSinkPlayback, AudioSource, PlaybackSettings, Volume};
+use bevy::prelude::*;
+use sim_core::aircraft::EngineKind;
+use std::f32::consts::TAU;
+
+const RATE: u32 = 22_050;
+
+pub fn wav_bytes(samples: &[f32]) -> Vec<u8> {
+    let data_len = (samples.len() * 2) as u32;
+    let mut v = Vec::with_capacity(44 + data_len as usize);
+    v.extend_from_slice(b"RIFF");
+    v.extend_from_slice(&(36 + data_len).to_le_bytes());
+    v.extend_from_slice(b"WAVEfmt ");
+    v.extend_from_slice(&16u32.to_le_bytes());
+    v.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    v.extend_from_slice(&1u16.to_le_bytes()); // mono
+    v.extend_from_slice(&RATE.to_le_bytes());
+    v.extend_from_slice(&(RATE * 2).to_le_bytes());
+    v.extend_from_slice(&2u16.to_le_bytes());
+    v.extend_from_slice(&16u16.to_le_bytes());
+    v.extend_from_slice(b"data");
+    v.extend_from_slice(&data_len.to_le_bytes());
+    for s in samples {
+        v.extend_from_slice(&((s.clamp(-1.0, 1.0) * 30_000.0) as i16).to_le_bytes());
+    }
+    v
+}
+
+struct Lcg(u32);
+impl Lcg {
+    fn next(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
+        (self.0 >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+    }
+}
+
+/// 把头部淡入、尾部淡出叠加到一起，使循环无爆音。
+fn make_loopable(mut s: Vec<f32>, fade: usize) -> Vec<f32> {
+    let n = s.len();
+    for i in 0..fade {
+        let t = i as f32 / fade as f32;
+        let tail = s[n - fade + i];
+        s[i] = s[i] * t + tail * (1.0 - t);
+    }
+    s.truncate(n - fade);
+    s
+}
+
+/// 活塞发动机：基频 + 谐波 + 点火脉动，整数周期 1 秒循环。
+pub fn synth_piston() -> Vec<f32> {
+    let f0 = 45.0f32;
+    let mut n = Lcg(7);
+    (0..RATE)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let mut s = 0.0;
+            for k in 1..=14 {
+                s += (TAU * f0 * k as f32 * t).sin() / (k as f32).powf(1.15);
+            }
+            let pulse = 0.65 + 0.35 * (TAU * f0 * 0.5 * t).sin();
+            (s * pulse * 0.32 + n.next() * 0.04).clamp(-1.0, 1.0)
+        })
+        .collect()
+}
+
+/// 涡桨：低频螺旋桨拍频 + 高频压气机啸叫。
+pub fn synth_turboprop() -> Vec<f32> {
+    let mut n = Lcg(11);
+    (0..RATE)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let prop = (TAU * 68.0 * t).sin() * 0.35 + (TAU * 136.0 * t).sin() * 0.2 + (TAU * 204.0 * t).sin() * 0.1;
+            let whine = (TAU * 1200.0 * t).sin() * 0.12 + (TAU * 2400.0 * t).sin() * 0.05;
+            prop + whine + n.next() * 0.08
+        })
+        .collect()
+}
+
+/// 涡扇：宽带噪声 + 风扇啸叫。
+pub fn synth_turbofan() -> Vec<f32> {
+    let mut n = Lcg(23);
+    let mut lp = 0.0f32;
+    (0..RATE)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            lp += (n.next() - lp) * 0.35;
+            lp * 0.5 + (TAU * 1500.0 * t).sin() * 0.14 + (TAU * 3000.0 * t).sin() * 0.06 + (TAU * 90.0 * t).sin() * 0.12
+        })
+        .collect()
+}
+
+pub fn synth_wind() -> Vec<f32> {
+    let mut n = Lcg(99);
+    let mut lp = 0.0f32;
+    let raw: Vec<f32> = (0..RATE * 2)
+        .map(|_| {
+            lp += (n.next() - lp) * 0.08;
+            lp * 1.6
+        })
+        .collect();
+    make_loopable(raw, 2000)
+}
+
+pub fn synth_stall_horn() -> Vec<f32> {
+    (0..RATE)
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            let gate = if (t * 2.0).fract() < 0.55 { 1.0 } else { 0.0 };
+            let sq = (TAU * 480.0 * t).sin().signum() * 0.5 + (TAU * 960.0 * t).sin() * 0.15;
+            sq * gate * 0.5
+        })
+        .collect()
+}
+
+pub fn synth_thump() -> Vec<f32> {
+    let mut n = Lcg(5);
+    (0..(RATE / 2))
+        .map(|i| {
+            let t = i as f32 / RATE as f32;
+            (TAU * 62.0 * t).sin() * (-t * 14.0).exp() * 0.9 + n.next() * (-t * 38.0).exp() * 0.6
+        })
+        .collect()
+}
+
+#[derive(Component)]
+pub enum Sound {
+    Engine,
+    Wind,
+    Stall,
+}
+
+#[derive(Resource)]
+pub struct SoundBank {
+    thump: Handle<AudioSource>,
+}
+
+fn setup_audio(mut commands: Commands, mut sources: ResMut<Assets<AudioSource>>, game: Res<GameState>) {
+    let mut add = |s: Vec<f32>| sources.add(AudioSource { bytes: wav_bytes(&s).into() });
+    let engine = match game.sim.config.engines.first().map(|e| e.kind) {
+        Some(EngineKind::Turbofan { .. }) => add(synth_turbofan()),
+        Some(EngineKind::Turboprop { .. }) => add(synth_turboprop()),
+        _ => add(synth_piston()),
+    };
+    let wind = add(synth_wind());
+    let stall = add(synth_stall_horn());
+    let thump = add(synth_thump());
+    let quiet = PlaybackSettings::LOOP.with_volume(Volume::Linear(0.0));
+    commands.spawn((AudioPlayer::new(engine), quiet, Sound::Engine));
+    commands.spawn((AudioPlayer::new(wind), quiet, Sound::Wind));
+    commands.spawn((AudioPlayer::new(stall), quiet, Sound::Stall));
+    commands.insert_resource(SoundBank { thump });
+}
+
+fn update_audio(mut commands: Commands, game: Res<GameState>, bank: Option<Res<SoundBank>>, mut q: Query<(&mut AudioSink, &Sound)>) {
+    let active = game.screen == crate::Screen::Flight && !game.paused && !game.sim.state.damage.crashed;
+    let d = &game.sim.diag;
+    let e = game.sim.state.engines.first().copied().unwrap_or_default();
+    let max_rpm = match game.sim.config.engines.first().map(|c| c.kind) {
+        Some(EngineKind::Piston { max_rpm, .. }) | Some(EngineKind::Turboprop { max_rpm, .. }) => max_rpm as f32,
+        _ => 100.0,
+    };
+    let eng_norm = (e.rpm as f32 / max_rpm).clamp(0.0, 1.2);
+    let cockpit_damp = if game.view == crate::cockpit_ui::ViewMode::Cockpit { 0.7 } else { 1.0 };
+    for (mut sink, kind) in &mut q {
+        match kind {
+            Sound::Engine => {
+                sink.set_speed(0.35 + eng_norm * 0.95);
+                let v = if active && e.running { (0.12 + 0.45 * eng_norm) * cockpit_damp } else { 0.0 };
+                sink.set_volume(Volume::Linear(v));
+            }
+            Sound::Wind => {
+                let v = if active { ((d.tas as f32) / 90.0).clamp(0.0, 1.0).powf(1.5) * 0.45 } else { 0.0 };
+                sink.set_speed(0.7 + (d.tas as f32 / 120.0).clamp(0.0, 1.0) * 0.8);
+                sink.set_volume(Volume::Linear(v));
+            }
+            Sound::Stall => {
+                let on = active && d.stall_warning;
+                sink.set_volume(Volume::Linear(if on { 0.45 } else { 0.0 }));
+            }
+        }
+    }
+    if let (Some(td), Some(bank)) = (d.touchdown, bank) {
+        commands.spawn((AudioPlayer::new(bank.thump.clone()), PlaybackSettings::DESPAWN.with_volume(Volume::Linear((0.35 + td as f32 * 0.25).min(1.0)))));
+    }
+}
+
+pub struct AudioPlugin;
+impl Plugin for AudioPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(PostStartup, setup_audio).add_systems(Update, update_audio);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn synthesized_audio_is_valid_wav_and_bounded() {
+        for s in [synth_piston(), synth_turboprop(), synth_turbofan(), synth_wind(), synth_stall_horn(), synth_thump()] {
+            assert!(!s.is_empty());
+            let w = wav_bytes(&s);
+            assert_eq!(&w[0..4], b"RIFF");
+            assert_eq!(&w[8..12], b"WAVE");
+            assert_eq!(w.len(), 44 + s.len() * 2);
+            assert!(s.iter().any(|x| x.abs() > 0.05), "silent buffer");
+        }
+    }
+}
+
+---
+
+//! 320×160 原生像素缓冲仪表盘 + 4×6 点阵字体 + HUD 模式 + 复古航图。
+//! 全部为纯 CPU 绘制函数（不依赖 Bevy），可直接单元测试。
+
+use crate::pixel_pipeline::{COCKPIT_VIEW_H, H, W};
+
+pub type Rgba = [u8; 4];
+pub const TRANSPARENT: Rgba = [0, 0, 0, 0];
+pub const BLACK: Rgba = [0, 0, 0, 255];
+pub const WHITE: Rgba = [240, 240, 240, 255];
+pub const GRAY: Rgba = [120, 120, 128, 255];
+pub const PANEL: Rgba = [44, 44, 52, 255];
+pub const PANEL_DK: Rgba = [26, 26, 32, 255];
+pub const SKY: Rgba = [64, 120, 216, 255];
+pub const GROUND: Rgba = [136, 88, 40, 255];
+pub const RED: Rgba = [232, 40, 40, 255];
+pub const AMBER: Rgba = [255, 176, 0, 255];
+pub const GREEN: Rgba = [64, 255, 96, 255];
+pub const YELLOW: Rgba = [255, 232, 40, 255];
+pub const CYAN: Rgba = [80, 224, 255, 255];
+pub const MAGENTA: Rgba = [232, 80, 232, 255];
+
+/// 4×6 点阵字体：每行 4 位（高位在左）。
+const GLYPHS: &[(char, [u8; 6])] = &[
+    ('0', [0x6, 0x9, 0x9, 0x9, 0x9, 0x6]),
+    ('1', [0x2, 0x6, 0x2, 0x2, 0x2, 0x7]),
+    ('2', [0x6, 0x9, 0x1, 0x2, 0x4, 0xF]),
+    ('3', [0x6, 0x9, 0x2, 0x1, 0x9, 0x6]),
+    ('4', [0x1, 0x3, 0x5, 0x9, 0xF, 0x1]),
+    ('5', [0xF, 0x8, 0xE, 0x1, 0x9, 0x6]),
+    ('6', [0x6, 0x8, 0xE, 0x9, 0x9, 0x6]),
+    ('7', [0xF, 0x1, 0x2, 0x4, 0x4, 0x4]),
+    ('8', [0x6, 0x9, 0x6, 0x9, 0x9, 0x6]),
+    ('9', [0x6, 0x9, 0x7, 0x1, 0x9, 0x6]),
+    ('A', [0x6, 0x9, 0x9, 0xF, 0x9, 0x9]),
+    ('B', [0xE, 0x9, 0xE, 0x9, 0x9, 0xE]),
+    ('C', [0x7, 0x8, 0x8, 0x8, 0x8, 0x7]),
+    ('D', [0xE, 0x9, 0x9, 0x9, 0x9, 0xE]),
+    ('E', [0xF, 0x8, 0xE, 0x8, 0x8, 0xF]),
+    ('F', [0xF, 0x8, 0xE, 0x8, 0x8, 0x8]),
+    ('G', [0x7, 0x8, 0xB, 0x9, 0x9, 0x7]),
+    ('H', [0x9, 0x9, 0xF, 0x9, 0x9, 0x9]),
+    ('I', [0x7, 0x2, 0x2, 0x2, 0x2, 0x7]),
+    ('J', [0x1, 0x1, 0x1, 0x1, 0x9, 0x6]),
+    ('K', [0x9, 0xA, 0xC, 0xA, 0x9, 0x9]),
+    ('L', [0x8, 0x8, 0x8, 0x8, 0x8, 0xF]),
+    ('M', [0x9, 0xF, 0xF, 0x9, 0x9, 0x9]),
+    ('N', [0x9, 0xD, 0xF, 0xB, 0x9, 0x9]),
+    ('O', [0x6, 0x9, 0x9, 0x9, 0x9, 0x6]),
+    ('P', [0xE, 0x9, 0x9, 0xE, 0x8, 0x8]),
+    ('Q', [0x6, 0x9, 0x9, 0x9, 0xB, 0x7]),
+    ('R', [0xE, 0x9, 0x9, 0xE, 0xA, 0x9]),
+    ('S', [0x7, 0x8, 0x6, 0x1, 0x1, 0xE]),
+    ('T', [0xF, 0x2, 0x2, 0x2, 0x2, 0x2]),
+    ('U', [0x9, 0x9, 0x9, 0x9, 0x9, 0x6]),
+    ('V', [0x9, 0x9, 0x9, 0x9, 0x6, 0x6]),
+    ('W', [0x9, 0x9, 0x9, 0xF, 0xF, 0x9]),
+    ('X', [0x9, 0x9, 0x6, 0x6, 0x9, 0x9]),
+    ('Y', [0x9, 0x9, 0x6, 0x2, 0x2, 0x2]),
+    ('Z', [0xF, 0x1, 0x2, 0x4, 0x8, 0xF]),
+    ('-', [0x0, 0x0, 0xF, 0x0, 0x0, 0x0]),
+    ('+', [0x0, 0x2, 0x7, 0x2, 0x0, 0x0]),
+    ('.', [0x0, 0x0, 0x0, 0x0, 0x0, 0x4]),
+    (':', [0x0, 0x4, 0x0, 0x0, 0x4, 0x0]),
+    ('/', [0x1, 0x1, 0x2, 0x4, 0x8, 0x8]),
+    ('%', [0x9, 0x1, 0x2, 0x4, 0x8, 0x9]),
+    ('<', [0x1, 0x2, 0x4, 0x4, 0x2, 0x1]),
+    ('>', [0x8, 0x4, 0x2, 0x2, 0x4, 0x8]),
+    ('*', [0x0, 0x9, 0x6, 0xF, 0x6, 0x9]),
+    ('^', [0x2, 0x5, 0x0, 0x0, 0x0, 0x0]),
+    ('=', [0x0, 0xF, 0x0, 0xF, 0x0, 0x0]),
+    ('#', [0x5, 0xF, 0x5, 0xF, 0x5, 0x0]),
+    ('?', [0x6, 0x9, 0x2, 0x4, 0x0, 0x4]),
+    (' ', [0, 0, 0, 0, 0, 0]),
+];
+
+pub fn glyph(c: char) -> Option<&'static [u8; 6]> {
+    let c = c.to_ascii_uppercase();
+    GLYPHS.iter().find(|(g, _)| *g == c).map(|(_, b)| b)
+}
+
+/// 原生 320×160 RGBA 像素缓冲。
+#[derive(Clone)]
+pub struct PixelBuffer {
+    pub data: Vec<u8>,
+}
+
+impl Default for PixelBuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PixelBuffer {
+    pub fn new() -> Self {
+        Self { data: vec![0; (W * H * 4) as usize] }
+    }
+    pub fn clear(&mut self, c: Rgba) {
+        for p in self.data.chunks_exact_mut(4) {
+            p.copy_from_slice(&c);
+        }
+    }
+    #[inline]
+    pub fn set(&mut self, x: i32, y: i32, c: Rgba) {
+        if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
+            return;
+        }
+        let i = ((y as u32 * W + x as u32) * 4) as usize;
+        self.data[i..i + 4].copy_from_slice(&c);
+    }
+    pub fn get(&self, x: i32, y: i32) -> Rgba {
+        if x < 0 || y < 0 || x >= W as i32 || y >= H as i32 {
+            return TRANSPARENT;
+        }
+        let i = ((y as u32 * W + x as u32) * 4) as usize;
+        [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
+    }
+    pub fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: Rgba) {
+        for yy in y..y + h {
+            for xx in x..x + w {
+                self.set(xx, yy, c);
+            }
+        }
+    }
+    pub fn frame(&mut self, x: i32, y: i32, w: i32, h: i32, c: Rgba) {
+        for xx in x..x + w {
+            self.set(xx, y, c);
+            self.set(xx, y + h - 1, c);
+        }
+        for yy in y..y + h {
+            self.set(x, yy, c);
+            self.set(x + w - 1, yy, c);
+        }
+    }
+    pub fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, c: Rgba) {
+        let (mut x, mut y) = (x0, y0);
+        let dx = (x1 - x0).abs();
+        let dy = -(y1 - y0).abs();
+        let sx = if x0 < x1 { 1 } else { -1 };
+        let sy = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            self.set(x, y, c);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+    pub fn disc(&mut self, cx: i32, cy: i32, r: i32, c: Rgba) {
+        for y in -r..=r {
+            for x in -r..=r {
+                if x * x + y * y <= r * r {
+                    self.set(cx + x, cy + y, c);
+                }
+            }
+        }
+    }
+    /// 绘制文本（字符宽 4 + 间隔 1，高 6），`scale` 为整数放大。返回结束 x。
+    pub fn text(&mut self, x: i32, y: i32, s: &str, c: Rgba, scale: i32) -> i32 {
+        let mut cx = x;
+        for ch in s.chars() {
+            if let Some(g) = glyph(ch) {
+                for (row, bits) in g.iter().enumerate() {
+                    for col in 0..4 {
+                        if bits & (0x8 >> col) != 0 {
+                            self.rect(cx + col * scale, y + row as i32 * scale, scale, scale, c);
+                        }
+                    }
+                }
+            }
+            cx += 5 * scale;
+        }
+        cx
+    }
+    pub fn text_width(s: &str, scale: i32) -> i32 {
+        s.chars().count() as i32 * 5 * scale - scale
+    }
+    pub fn text_center(&mut self, cx: i32, y: i32, s: &str, c: Rgba, scale: i32) {
+        let w = Self::text_width(s, scale);
+        self.text(cx - w / 2, y, s, c, scale);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewMode {
+    Cockpit,
+    Hud,
+    Chase,
+    Flyby,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IlsHud {
+    pub ident: String,
+    pub loc_deg: f64,
+    pub gs_deg: f64,
+    pub loc_valid: bool,
+    pub gs_valid: bool,
+    pub dist_km: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FlightHud {
+    pub ias_kt: f64,
+    pub ias_failed: bool,
+    pub gs_kt: f64,
+    pub alt_ft: f64,
+    pub vs_fpm: f64,
+    pub agl_ft: f64,
+    pub heading: f64,
+    pub pitch: f64,
+    pub roll: f64,
+    pub aoa: f64,
+    pub nz: f64,
+    pub throttle: f64,
+    pub rpm: f64,
+    pub fuel_kg: f64,
+    pub flaps_deg: f64,
+    pub gear_down: bool,
+    pub trim: f64,
+    pub brake: bool,
+    pub parking: bool,
+    pub stall: bool,
+    pub ice: f64,
+    pub ovspd: bool,
+    pub glim: bool,
+    pub gear_warn: bool,
+    pub ils: Option<IlsHud>,
+    pub nav_text: String,
+    /// 飞行航迹矢量相对机头的偏移（度）：(横向, 垂直)。
+    pub fpv: (f64, f64),
+    pub damage: Option<String>,
+    pub frost: f64,
+    pub rain: f64,
+    pub time: f64,
+    pub code: String,
+    pub engine_label: &'static str,
+}
+
+fn lamp(buf: &mut PixelBuffer, x: i32, y: i32, label: &str, on: bool, color: Rgba, blink: bool, t: f64) {
+    let lit = on && (!blink || (t * 4.0) as i64 % 2 == 0);
+    let bg = if lit { color } else { PANEL_DK };
+    buf.rect(x, y, label.len() as i32 * 5 + 1, 8, bg);
+    buf.text(x + 1, y + 1, label, if lit { BLACK } else { [70, 70, 78, 255] }, 1);
+}
+
+/// 地平仪：边长 36 的圆形仪表。
+pub fn draw_attitude(buf: &mut PixelBuffer, cx: i32, cy: i32, pitch: f64, roll: f64) {
+    let r = 18;
+    let (sr, cr) = (roll.to_radians().sin(), roll.to_radians().cos());
+    let ppd = 0.9;
+    for dy in -r..r {
+        for dx in -r..r {
+            if dx * dx + dy * dy > r * r {
+                continue;
+            }
+            let (fx, fy) = (dx as f64 + 0.5, dy as f64 + 0.5);
+            let d = fy * cr + fx * sr;
+            let col = if d > pitch * ppd { GROUND } else { SKY };
+            buf.set(cx + dx, cy + dy, col);
+        }
+    }
+    // 俯仰刻度（每 10°）
+    for k in [-20, -10, 10, 20] {
+        let off = (k as f64 - pitch) * -ppd; // 屏幕 y（下为正）：+俯仰在地平线上方
+        let (hx, hy) = (-sr * off, cr * off);
+        let half = if k.abs() == 10 { 5.0 } else { 8.0 };
+        let (ax, ay) = (hx - cr * half, hy + sr * half * -1.0 * -1.0);
+        let (bx, by) = (hx + cr * half, hy - sr * half * -1.0 * -1.0);
+        let _ = (ax, ay, bx, by);
+        let (x0, y0) = (hx - cr * half, hy + sr * half);
+        let (x1, y1) = (hx + cr * half, hy - sr * half);
+        if hx * hx + hy * hy < (r - 3) as f64 * (r - 3) as f64 {
+            buf.line(cx + x0.round() as i32, cy + y0.round() as i32, cx + x1.round() as i32, cy + y1.round() as i32, WHITE);
+        }
+    }
+    // 地平线
+    let (hx, hy) = (-sr * (pitch * ppd), cr * (pitch * ppd));
+    buf.line(
+        cx + (hx - cr * 17.0).round() as i32,
+        cy + (hy + sr * 17.0).round() as i32,
+        cx + (hx + cr * 17.0).round() as i32,
+        cy + (hy - sr * 17.0).round() as i32,
+        WHITE,
+    );
+    // 外圈 + 坡度指针
+    for a in 0..72 {
+        let t = a as f64 / 72.0 * std::f64::consts::TAU;
+        buf.set(cx + (t.cos() * r as f64).round() as i32, cy + (t.sin() * r as f64).round() as i32, GRAY);
+    }
+    let bank_x = cx as f64 + (r as f64 - 3.0) * (roll.to_radians() - std::f64::consts::FRAC_PI_2).cos() * -1.0 * -1.0;
+    let _ = bank_x;
+    let a = -std::f64::consts::FRAC_PI_2 - roll.to_radians();
+    buf.rect(cx + ((r - 3) as f64 * a.cos()).round() as i32, cy + ((r - 3) as f64 * a.sin()).round() as i32, 2, 2, YELLOW);
+    // 固定机翼符号
+    buf.rect(cx - 9, cy, 6, 1, YELLOW);
+    buf.rect(cx + 4, cy, 6, 1, YELLOW);
+    buf.rect(cx - 1, cy - 1, 3, 3, YELLOW);
+}
+
+fn draw_cdi(buf: &mut PixelBuffer, x: i32, y: i32, ils: &IlsHud) {
+    // 28×28 十字指针：竖针 = 航向道，横针 = 下滑道
+    buf.rect(x, y, 30, 30, PANEL_DK);
+    buf.frame(x, y, 30, 30, GRAY);
+    for k in [-2, -1, 1, 2] {
+        buf.set(x + 15 + k * 5, y + 15, GRAY);
+        buf.set(x + 15, y + 15 + k * 5, GRAY);
+    }
+    buf.set(x + 15, y + 15, WHITE);
+    if ils.loc_valid {
+        // 满偏 ±2.5°（2 点）；指针指向“需要飞向的一侧”：飞机在右侧(+) → 指针偏左
+        let px = (-(ils.loc_deg / 2.5) * 10.0).clamp(-13.0, 13.0).round() as i32;
+        buf.rect(x + 15 + px, y + 2, 1, 26, MAGENTA);
+    } else {
+        buf.text(x + 2, y + 2, "LOC", RED, 1);
+    }
+    if ils.gs_valid {
+        // 飞机在下滑道上方(+) → 指针偏下（需要下降）
+        let py = ((ils.gs_deg / 0.7) * 10.0).clamp(-13.0, 13.0).round() as i32;
+        buf.rect(x + 2, y + 15 + py, 26, 1, MAGENTA);
+    } else {
+        buf.text(x + 2, y + 23, "GS", RED, 1);
+    }
+}
+
+fn draw_compass(buf: &mut PixelBuffer, cx: i32, y: i32, heading: f64) {
+    buf.rect(cx - 33, y, 66, 10, PANEL_DK);
+    buf.frame(cx - 33, y, 66, 10, GRAY);
+    for d in -30..=30 {
+        let h = (heading + d as f64 * 1.0).rem_euclid(360.0);
+        let hi = h.round() as i32 % 360;
+        if hi % 10 == 0 {
+            buf.rect(cx + d, y + 8, 1, 2, WHITE);
+            if hi % 30 == 0 {
+                let label = match hi {
+                    0 => "N".to_string(),
+                    90 => "E".to_string(),
+                    180 => "S".to_string(),
+                    270 => "W".to_string(),
+                    _ => format!("{}", hi / 10),
+                };
+                let w = PixelBuffer::text_width(&label, 1);
+                buf.text(cx + d - w / 2, y + 2, &label, CYAN, 1);
+            }
+        }
+    }
+    buf.rect(cx, y, 1, 3, YELLOW);
+}
+
+/// 驾驶舱下部 320×48 仪表盘。
+fn draw_panel(buf: &mut PixelBuffer, h: &FlightHud) {
+    let y0 = COCKPIT_VIEW_H as i32;
+    let ph = (H - COCKPIT_VIEW_H) as i32;
+    buf.rect(0, y0, W as i32, ph, PANEL);
+    buf.rect(0, y0, W as i32, 1, BLACK);
+
+    // 左：油门/引擎/燃油/襟翼/起落架/配平/刹车
+    buf.rect(2, y0 + 3, 5, 42, PANEL_DK);
+    let th = (h.throttle.clamp(0.0, 1.0) * 40.0).round() as i32;
+    buf.rect(3, y0 + 4 + (40 - th), 3, th, GREEN);
+    buf.text(10, y0 + 3, &format!("THR {:3.0}", h.throttle * 100.0), WHITE, 1);
+    buf.text(10, y0 + 10, &format!("{} {:4.0}", h.engine_label, h.rpm), WHITE, 1);
+    buf.text(10, y0 + 17, &format!("FUEL {:3.0}", h.fuel_kg), if h.fuel_kg < 15.0 { RED } else { WHITE }, 1);
+    buf.text(10, y0 + 24, &format!("FLP {:2.0}", h.flaps_deg), WHITE, 1);
+    buf.text(10, y0 + 31, &format!("TRM {:+.1}", h.trim), WHITE, 1);
+    buf.text(10, y0 + 38, if h.parking { "PARK BRK" } else if h.brake { "BRAKE" } else { "GEAR" }, if h.parking || h.brake { AMBER } else { WHITE }, 1);
+    if !h.parking && !h.brake {
+        buf.rect(30, y0 + 38, 5, 6, if h.gear_down { GREEN } else { RED });
+    }
+
+    // 中左：表速 IAS（2× 大字）、AoA、G 条
+    buf.rect(64, y0 + 3, 70, 42, PANEL_DK);
+    buf.frame(64, y0 + 3, 70, 42, GRAY);
+    buf.text(67, y0 + 6, "IAS KT", GRAY, 1);
+    if h.ias_failed {
+        buf.text(70, y0 + 14, "FAIL", RED, 2);
+    } else {
+        buf.text(70, y0 + 14, &format!("{:3.0}", h.ias_kt), WHITE, 2);
+    }
+    buf.text(102, y0 + 6, &format!("GS{:3.0}", h.gs_kt), GRAY, 1);
+    buf.text(67, y0 + 30, &format!("AOA{:5.1}", h.aoa), if h.stall { RED } else { WHITE }, 1);
+    // G 条：-2..+5
+    let g = h.nz.clamp(-2.0, 5.0);
+    buf.rect(67, y0 + 38, 64, 5, BLACK);
+    buf.rect(67 + 18, y0 + 38, 1, 5, WHITE);
+    let gx = 67 + ((g + 2.0) / 7.0 * 63.0).round() as i32;
+    buf.rect(gx - 1, y0 + 38, 3, 5, if h.glim { RED } else { GREEN });
+    buf.text(112, y0 + 30, &format!("G{:4.1}", h.nz), if h.glim { RED } else { WHITE }, 1);
+
+    // 中：地平仪
+    draw_attitude(buf, 160, y0 + 24, h.pitch, h.roll);
+
+    // 中右：ALT、VSI、AGL
+    buf.rect(186, y0 + 3, 66, 42, PANEL_DK);
+    buf.frame(186, y0 + 3, 66, 42, GRAY);
+    buf.text(189, y0 + 6, "ALT FT", GRAY, 1);
+    buf.text(189, y0 + 14, &format!("{:5.0}", h.alt_ft), WHITE, 2);
+    buf.text(189, y0 + 30, &format!("VS{:+5.0}", h.vs_fpm), if h.vs_fpm < -1500.0 { AMBER } else { WHITE }, 1);
+    buf.text(189, y0 + 38, &format!("AGL{:5.0}", h.agl_ft.max(0.0)), if h.agl_ft < 200.0 { AMBER } else { WHITE }, 1);
+
+    // 右：罗盘、ILS 十字、告警灯
+    draw_compass(buf, 286, y0 + 3, h.heading);
+    buf.text(256, y0 + 15, &format!("HDG {:03.0}", h.heading), WHITE, 1);
+    match &h.ils {
+        Some(i) => {
+            draw_cdi(buf, 256, y0 + 15 + 7 + 3 - 7 + 12 - 12 + 0, i);
+            buf.text(290, y0 + 17, &i.ident, MAGENTA, 1);
+            buf.text(290, y0 + 24, &format!("{:4.1}K", i.dist_km), WHITE, 1);
+        }
+        None => {
+            buf.text(256, y0 + 24, &h.nav_text, GRAY, 1);
+        }
+    }
+    let t = h.time;
+    lamp(buf, 290, y0 + 31, "STALL", h.stall, RED, true, t);
+    lamp(buf, 256, y0 + 33, "ICE", h.ice > 0.02, AMBER, h.ice > 0.4, t);
+    lamp(buf, 276 - 4, y0 + 33, "OVSPD", h.ovspd, RED, true, t);
+    lamp(buf, 256, y0 + 41, "G-LIM", h.glim, RED, true, t);
+    lamp(buf, 290, y0 + 40, "GEAR", h.gear_warn, RED, true, t);
+}
+
+/// 窗外画面叠加：风挡框、机鼻、结霜、雨线（驾驶舱视角）。
+fn draw_windshield(buf: &mut PixelBuffer, h: &FlightHud) {
+    let vh = COCKPIT_VIEW_H as i32;
+    let frame = [34, 36, 30, 255];
+    // 上沿与两侧立柱
+    buf.rect(0, 0, W as i32, 3, frame);
+    for y in 0..vh {
+        let w = 8 - (y * 8 / vh);
+        buf.rect(0, y, w.max(2), 1, frame);
+        buf.rect(W as i32 - w.max(2), y, w.max(2), 1, frame);
+    }
+    // 中立柱（细）
+    buf.rect(159, 0, 2, 4, frame);
+    // 机鼻罩（底部梯形）
+    for y in (vh - 9)..vh {
+        let k = y - (vh - 9);
+        buf.rect(100 - k * 6, y, 120 + k * 12, 1, [52, 56, 48, 255]);
+    }
+    buf.rect(0, vh - 1, W as i32, 1, BLACK);
+    // 结霜：从边缘向内生长
+    if h.frost > 0.01 {
+        let n = (h.frost * 700.0) as u32;
+        let mut s = 0x1234_5678u32;
+        for _ in 0..n {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let rx = (s >> 8) % W;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let ry = (s >> 8) % COCKPIT_VIEW_H;
+            // 靠近边缘的概率更大
+            let ex = (rx as f64 - 160.0).abs() / 160.0;
+            let ey = (ry as f64 - 56.0).abs() / 56.0;
+            if ex.max(ey) > 1.0 - h.frost * 0.9 {
+                buf.set(rx as i32, ry as i32, [225, 238, 255, 230]);
+            }
+        }
+    }
+    // 雨线
+    if h.rain > 0.02 {
+        let n = (h.rain * 60.0) as i32;
+        let mut s = ((h.time * 20.0) as u32).wrapping_mul(2654435761);
+        for _ in 0..n {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let rx = ((s >> 8) % W) as i32;
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            let ry = ((s >> 8) % (COCKPIT_VIEW_H - 14)) as i32;
+            buf.line(rx, ry, rx - 2, ry + 5, [200, 220, 255, 190]);
+        }
+    }
+}
+
+/// 极简 HUD：荧光绿速度带/高度带/FPV/俯仰梯。
+fn draw_hud(buf: &mut PixelBuffer, h: &FlightHud, c: Rgba) {
+    let cx = 160;
+    let cy = 80;
+    // 俯仰梯：3.2 px/度（垂直视场 50°），随滚转旋转
+    let ppd = 3.2;
+    let (sr, cr) = (h.roll.to_radians().sin(), h.roll.to_radians().cos());
+    for k in (-30..=30).step_by(5) {
+        if k == 0 {
+            continue;
+        }
+        let off = (k as f64 - h.pitch) * -ppd;
+        let (px, py) = (-sr * off, cr * off);
+        if py.abs() > 62.0 {
+            continue;
+        }
+        let half = if k % 10 == 0 { 14.0 } else { 7.0 };
+        let (x0, y0) = (px - cr * half, py + sr * half);
+        let (x1, y1) = (px + cr * half, py - sr * half);
+        buf.line(cx + x0.round() as i32, cy + y0.round() as i32, cx + x1.round() as i32, cy + y1.round() as i32, c);
+        if k % 10 == 0 {
+            buf.text(cx + x1.round() as i32 + 3, cy + y1.round() as i32 - 3, &format!("{}", k.abs()), c, 1);
+        }
+    }
+    // 地平线
+    let off = h.pitch * ppd;
+    let (px, py) = (-sr * off, cr * off);
+    buf.line(cx + (px - cr * 60.0).round() as i32, cy + (py + sr * 60.0).round() as i32, cx + (px + cr * 60.0).round() as i32, cy + (py - sr * 60.0).round() as i32, c);
+    // FPV（飞行航迹矢量）
+    let fx = cx + (h.fpv.0 * ppd).clamp(-60.0, 60.0).round() as i32;
+    let fy = cy - (h.fpv.1 * ppd).clamp(-50.0, 50.0).round() as i32;
+    for a in 0..16 {
+        let t = a as f64 / 16.0 * std::f64::consts::TAU;
+        buf.set(fx + (t.cos() * 3.5).round() as i32, fy + (t.sin() * 3.5).round() as i32, c);
+    }
+    buf.rect(fx - 8, fy, 4, 1, c);
+    buf.rect(fx + 5, fy, 4, 1, c);
+    buf.rect(fx, fy - 7, 1, 3, c);
+    // 速度带（左）
+    buf.frame(6, cy - 8, 26, 14, c);
+    buf.text(9, cy - 4, &if h.ias_failed { "FAIL".to_string() } else { format!("{:3.0}", h.ias_kt) }, c, 1);
+    for d in -5..=5 {
+        let v = (h.ias_kt / 10.0).round() as i32 * 10 + d * 10;
+        let y = cy + ((h.ias_kt - v as f64) * 1.0) as i32 * 2 / 2;
+        if v >= 0 && (y - cy).abs() < 54 && (y - cy).abs() > 9 {
+            buf.rect(2, y, 3, 1, c);
+            buf.text(33, y - 3, &format!("{}", v), c, 1);
+        }
+    }
+    // 高度带（右）
+    buf.frame(W as i32 - 38, cy - 8, 32, 14, c);
+    buf.text(W as i32 - 36, cy - 4, &format!("{:5.0}", h.alt_ft), c, 1);
+    buf.text(W as i32 - 38, cy + 12, &format!("VS{:+5.0}", h.vs_fpm), c, 1);
+    buf.text(W as i32 - 38, cy + 20, &format!("R{:5.0}", h.agl_ft.max(0.0)), c, 1);
+    // 航向（上）
+    buf.text_center(cx, 4, &format!("{:03.0}", h.heading), c, 1);
+    buf.rect(cx, 11, 1, 3, c);
+    buf.text(6, 4, &format!("G{:3.1}", h.nz), c, 1);
+    buf.text(6, 148, &format!("THR{:3.0} FLP{:2.0}", h.throttle * 100.0, h.flaps_deg), c, 1);
+    buf.text(W as i32 - 74, 148, &format!("AOA{:5.1}", h.aoa), c, 1);
+    if let Some(i) = &h.ils {
+        if i.loc_valid {
+            let px = cx + (-(i.loc_deg / 2.5) * 20.0).clamp(-60.0, 60.0).round() as i32;
+            buf.rect(px, cy + 40, 1, 12, MAGENTA);
+        }
+        if i.gs_valid {
+            let py = cy + ((i.gs_deg / 0.7) * 12.0).clamp(-36.0, 36.0).round() as i32;
+            buf.rect(cx + 70, py, 12, 1, MAGENTA);
+        }
+    }
+}
+
+fn draw_alerts(buf: &mut PixelBuffer, h: &FlightHud, y: i32) {
+    let blink = (h.time * 3.0) as i64 % 2 == 0;
+    let mut msg: Option<(&str, Rgba)> = None;
+    if h.damage.as_deref() == Some("CRASH") {
+        msg = Some(("CRASH", RED));
+    } else if h.stall && blink {
+        msg = Some(("STALL", RED));
+    } else if h.ovspd && blink {
+        msg = Some(("OVERSPEED", RED));
+    } else if h.glim && blink {
+        msg = Some(("G LIMIT", RED));
+    } else if h.gear_warn && blink {
+        msg = Some(("GEAR", AMBER));
+    }
+    if let Some((m, c)) = msg {
+        buf.text_center(160, y, m, c, 2);
+    }
+    if let Some(d) = &h.damage {
+        if d != "CRASH" {
+            buf.text_center(160, y + 14, d, RED, 1);
+        }
+    }
+}
+
+/// 绘制整个飞行界面到（透明）缓冲。
+pub fn draw_flight(buf: &mut PixelBuffer, h: &FlightHud, view: ViewMode) {
+    buf.clear(TRANSPARENT);
+    match view {
+        ViewMode::Cockpit => {
+            draw_windshield(buf, h);
+            draw_panel(buf, h);
+            draw_alerts(buf, h, 30);
+        }
+        ViewMode::Hud => {
+            draw_hud(buf, h, GREEN);
+            draw_alerts(buf, h, 30);
+            if h.frost > 0.2 {
+                draw_windshield_frost_only(buf, h);
+            }
+        }
+        ViewMode::Chase | ViewMode::Flyby => {
+            let c = if view == ViewMode::Chase { "CHASE" } else { "FLYBY" };
+            buf.text(4, 4, c, WHITE, 1);
+            buf.text(4, 12, &format!("IAS {:3.0} ALT {:5.0}", h.ias_kt, h.alt_ft), WHITE, 1);
+            buf.text(4, 20, &format!("HDG {:03.0} VS {:+.0}", h.heading, h.vs_fpm), WHITE, 1);
+            draw_alerts(buf, h, 30);
+        }
+    }
+    buf.text(W as i32 - 4 - PixelBuffer::text_width(&h.code, 1), 4, &h.code, GRAY, 1);
+}
+
+fn draw_windshield_frost_only(buf: &mut PixelBuffer, h: &FlightHud) {
+    let mut s = 0x9e37_79b9u32;
+    for _ in 0..(h.frost * 500.0) as u32 {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let rx = (s >> 8) % W;
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let ry = (s >> 8) % H;
+        let ex = (rx as f64 - 160.0).abs() / 160.0;
+        let ey = (ry as f64 - 80.0).abs() / 80.0;
+        if ex.max(ey) > 1.0 - h.frost * 0.9 {
+            buf.set(rx as i32, ry as i32, [225, 238, 255, 230]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 航图 / 大地图（按 M 切换）
+// ---------------------------------------------------------------------------
+
+pub const MAP_H: i32 = 140;
+
+#[derive(Clone)]
+pub struct MapMarker {
+    pub px: i32,
+    pub py: i32,
+    /// 0 = 土路，1 = 支线，2 = 枢纽。
+    pub kind: u8,
+}
+
+pub struct MapView<'a> {
+    /// 320×MAP_H 的 RGB 地图。
+    pub terrain: Option<&'a [[u8; 3]]>,
+    pub markers: &'a [MapMarker],
+    pub selected: Option<usize>,
+    pub cursor: (i32, i32),
+    pub aircraft: Option<(i32, i32, f64)>,
+    pub status: [String; 2],
+    pub time: f64,
+}
+
+pub fn draw_map(buf: &mut PixelBuffer, m: &MapView) {
+    buf.clear(BLACK);
+    match m.terrain {
+        Some(t) => {
+            for y in 0..MAP_H {
+                for x in 0..W as i32 {
+                    let c = t[(y as u32 * W + x as u32) as usize];
+                    buf.set(x, y, [c[0], c[1], c[2], 255]);
+                }
+            }
+        }
+        None => {
+            buf.rect(0, 0, W as i32, MAP_H, [10, 20, 40, 255]);
+            buf.text_center(160, 66, "GENERATING CHART...", CYAN, 1);
+        }
+    }
+    // 经纬网格
+    for lon in (0..W as i32).step_by(40) {
+        for y in (0..MAP_H).step_by(2) {
+            buf.set(lon, y, [255, 255, 255, 60]);
+        }
+    }
+    for lat in (0..MAP_H).step_by(35) {
+        for x in (0..W as i32).step_by(2) {
+            buf.set(x, lat, [255, 255, 255, 60]);
+        }
+    }
+    for (i, mk) in m.markers.iter().enumerate() {
+        let c = match mk.kind {
+            2 => WHITE,
+            1 => YELLOW,
+            _ => AMBER,
+        };
+        if Some(i) == m.selected {
+            if (m.time * 3.0) as i64 % 2 == 0 {
+                buf.frame(mk.px - 3, mk.py - 3, 7, 7, RED);
+            }
+            buf.rect(mk.px - 1, mk.py - 1, 3, 3, RED);
+        } else if mk.kind == 2 {
+            buf.rect(mk.px - 1, mk.py - 1, 3, 3, c);
+        } else {
+            buf.set(mk.px, mk.py, c);
+            buf.set(mk.px + 1, mk.py, c);
+        }
+    }
+    if let Some((ax, ay, hdg)) = m.aircraft {
+        let (dx, dy) = (hdg.to_radians().sin(), -hdg.to_radians().cos());
+        buf.line(ax, ay, ax + (dx * 6.0) as i32, ay + (dy * 6.0) as i32, CYAN);
+        buf.disc(ax, ay, 1, CYAN);
+    }
+    // 光标
+    let (cx, cy) = m.cursor;
+    buf.rect(cx - 4, cy, 3, 1, WHITE);
+    buf.rect(cx + 2, cy, 3, 1, WHITE);
+    buf.rect(cx, cy - 4, 1, 3, WHITE);
+    buf.rect(cx, cy + 2, 1, 3, WHITE);
+    // 底部信息栏
+    buf.rect(0, MAP_H, W as i32, H as i32 - MAP_H, PANEL_DK);
+    buf.text(3, MAP_H + 3, &m.status[0], WHITE, 1);
+    buf.text(3, MAP_H + 11, &m.status[1], CYAN, 1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_covers_all_needed_chars() {
+        for c in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-+.:/%<>*^=#? ".chars() {
+            assert!(glyph(c).is_some(), "missing glyph {c}");
+        }
+        assert!(glyph('a').is_some());
+    }
+
+    #[test]
+    fn text_draws_pixels_within_buffer() {
+        let mut b = PixelBuffer::new();
+        let end = b.text(2, 2, "IAS 100", WHITE, 1);
+        assert_eq!(end, 2 + 7 * 5);
+        assert!(b.data.chunks_exact(4).any(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn attitude_indicator_level_is_half_sky_half_ground() {
+        let mut b = PixelBuffer::new();
+        draw_attitude(&mut b, 160, 136, 0.0, 0.0);
+        assert_eq!(b.get(160, 126), SKY);
+        assert_eq!(b.get(160, 146), GROUND);
+        // 俯仰 +10°：地平线下移 → 中心上方更多天空，中心偏下仍是天空
+        let mut b = PixelBuffer::new();
+        draw_attitude(&mut b, 160, 136, 10.0, 0.0);
+        assert_eq!(b.get(150, 141), SKY);
+        // 右坡度：右侧地平线抬高 → 右侧中间偏上更可能是地面
+        let mut b = PixelBuffer::new();
+        draw_attitude(&mut b, 160, 136, 0.0, 30.0);
+        assert_eq!(b.get(160 + 12, 136 - 3), GROUND);
+        assert_eq!(b.get(160 - 12, 136 + 3), SKY);
+    }
+
+    #[test]
+    fn full_cockpit_renders_without_panic() {
+        let mut b = PixelBuffer::new();
+        let h = FlightHud { ias_kt: 90.0, alt_ft: 4500.0, stall: true, ice: 0.5, frost: 0.5, rain: 0.5, ils: Some(IlsHud { ident: "IABC".into(), loc_valid: true, gs_valid: true, ..Default::default() }), code: "SKY-172".into(), engine_label: "RPM", ..Default::default() };
+        for v in [ViewMode::Cockpit, ViewMode::Hud, ViewMode::Chase, ViewMode::Flyby] {
+            draw_flight(&mut b, &h, v);
+        }
+        draw_flight(&mut b, &h, ViewMode::Cockpit);
+        // 下部 48 像素为不透明仪表盘；上部窗外区域大部分透明
+        assert_eq!(b.get(160, 150)[3], 255);
+        assert_eq!(b.get(160, 40)[3], 0);
+    }
+}
+
+---
+
+//! 键盘 / 手柄统一输入映射（俯仰/滚转/偏航/油门/襟翼/起落架/刹车/配平/视角）。
+//!
+//! 键盘：W/S 或 ↑/↓ 俯仰（S/↓ 拉杆）、A/D 或 ←/→ 滚转、Q/E 方向舵、Shift/Ctrl 油门↑↓（Z 全油门 X 慢车）、
+//! F/V 襟翼放/收、G 起落架、Space 刹车、B 驻车刹车、T/Y 配平、H 皮托加温、I 除冰、J 减速板、K 反推、
+//! 1-4 视角（驾驶舱/HUD/追尾/掠过）、M 航图、C 切换天气、P 暂停、Backspace 重置。
+
+use crate::cockpit_ui::ViewMode;
+use crate::{GameState, Screen};
+use bevy::input::gamepad::{Gamepad, GamepadAxis, GamepadButton};
+use bevy::prelude::*;
+
+pub fn read_input(keys: Res<ButtonInput<KeyCode>>, pads: Query<&Gamepad>, mut game: ResMut<GameState>, time: Res<Time>) {
+    let dt = time.delta_secs_f64();
+    if keys.just_pressed(KeyCode::KeyM) {
+        game.screen = if game.screen == Screen::Flight { Screen::Map } else { Screen::Flight };
+    }
+    if game.screen != Screen::Flight {
+        return;
+    }
+    let ax = |neg: KeyCode, pos: KeyCode| (keys.pressed(pos) as i32 - keys.pressed(neg) as i32) as f64;
+    // 键盘：S/↓ = 拉杆（抬头）
+    let mut pitch = ax(KeyCode::KeyW, KeyCode::KeyS) + ax(KeyCode::ArrowUp, KeyCode::ArrowDown);
+    let mut roll = ax(KeyCode::KeyA, KeyCode::KeyD) + ax(KeyCode::ArrowLeft, KeyCode::ArrowRight);
+    let mut yaw = ax(KeyCode::KeyQ, KeyCode::KeyE);
+
+    let mut throttle_delta = 0.0;
+    if keys.pressed(KeyCode::ShiftLeft) {
+        throttle_delta += 0.5 * dt;
+    }
+    if keys.pressed(KeyCode::ControlLeft) {
+        throttle_delta -= 0.5 * dt;
+    }
+    let mut gear_toggle = keys.just_pressed(KeyCode::KeyG);
+    let mut flaps_down = keys.just_pressed(KeyCode::KeyF);
+    let mut flaps_up = keys.just_pressed(KeyCode::KeyV);
+    let mut brake = keys.pressed(KeyCode::Space);
+
+    for pad in &pads {
+        let (lx, ly) = (pad.get(GamepadAxis::LeftStickX).unwrap_or(0.0), pad.get(GamepadAxis::LeftStickY).unwrap_or(0.0));
+        let rx = pad.get(GamepadAxis::RightStickX).unwrap_or(0.0);
+        let dz = |v: f32| if v.abs() < 0.08 { 0.0 } else { v as f64 };
+        if dz(lx) != 0.0 {
+            roll = dz(lx);
+        }
+        if dz(ly) != 0.0 {
+            pitch = -dz(ly); // 向后拉（摇杆负 Y）= 抬头
+        }
+        if dz(rx) != 0.0 {
+            yaw = dz(rx);
+        }
+        let rt = pad.get(GamepadButton::RightTrigger2).unwrap_or(0.0) as f64;
+        let lt = pad.get(GamepadButton::LeftTrigger2).unwrap_or(0.0) as f64;
+        throttle_delta += (rt - lt) * 0.6 * dt;
+        gear_toggle |= pad.just_pressed(GamepadButton::South);
+        flaps_down |= pad.just_pressed(GamepadButton::East);
+        flaps_up |= pad.just_pressed(GamepadButton::West);
+        brake |= pad.pressed(GamepadButton::LeftTrigger);
+    }
+
+    let n_detents = game.sim.config.flap_detents.len();
+    if flaps_down && game.flap_idx + 1 < n_detents {
+        game.flap_idx += 1;
+    }
+    if flaps_up && game.flap_idx > 0 {
+        game.flap_idx -= 1;
+    }
+    let flap_target = game.sim.config.flap_detents[game.flap_idx];
+
+    if keys.just_pressed(KeyCode::KeyZ) {
+        game.sim.controls.throttle = 1.0;
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        game.sim.controls.throttle = 0.0;
+    }
+    let c = &mut game.sim.controls;
+    c.pitch = pitch.clamp(-1.0, 1.0);
+    c.roll = roll.clamp(-1.0, 1.0);
+    c.yaw = yaw.clamp(-1.0, 1.0);
+    c.throttle = (c.throttle + throttle_delta).clamp(0.0, 1.0);
+    c.flaps = flap_target;
+    if gear_toggle {
+        c.gear_down = !c.gear_down;
+    }
+    let b = if brake { 1.0 } else { 0.0 };
+    c.brake_left = b;
+    c.brake_right = b;
+    if keys.just_pressed(KeyCode::KeyB) {
+        c.parking_brake = !c.parking_brake;
+    }
+    let trim = (keys.pressed(KeyCode::KeyT) as i32 - keys.pressed(KeyCode::KeyY) as i32) as f64;
+    c.pitch_trim = (c.pitch_trim + trim * 0.25 * dt).clamp(-1.0, 1.0);
+    if keys.just_pressed(KeyCode::KeyH) {
+        c.pitot_heat = !c.pitot_heat;
+    }
+    if keys.just_pressed(KeyCode::KeyI) {
+        c.deice = !c.deice;
+    }
+    c.speedbrake = if keys.pressed(KeyCode::KeyJ) { 1.0 } else { 0.0 };
+    c.reverse = keys.pressed(KeyCode::KeyK);
+
+    for (k, v) in [(KeyCode::Digit1, ViewMode::Cockpit), (KeyCode::Digit2, ViewMode::Hud), (KeyCode::Digit3, ViewMode::Chase), (KeyCode::Digit4, ViewMode::Flyby)] {
+        if keys.just_pressed(k) {
+            game.view = v;
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyP) {
+        game.paused = !game.paused;
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        game.cycle_weather();
+    }
+    if keys.just_pressed(KeyCode::Backspace) {
+        game.respawn();
+    }
+}
+
+---
+
+//! STRATO-32 客户端：Bevy 320×160 像素风复古飞行模拟器。
+//!
+//! 运行：`cargo run -p app_client --release -- [--seed N] [--icao XXXX] [--day D] [--hour H]`
+//! 开发期加速：`cargo run -p app_client --features dev`
+
+mod aircraft_mesh;
+mod airport_visuals;
+mod audio;
+mod cockpit_ui;
+mod input;
+mod map_screen;
+mod mesh_util;
+mod origin;
+mod pixel_pipeline;
+mod terrain_mesh;
+mod weather_fx;
+
+use bevy::camera::{Camera, Viewport};
+use bevy::math::DVec3;
+use bevy::prelude::*;
+use bevy::window::WindowPlugin;
+use cockpit_ui::{FlightHud, IlsHud, PixelBuffer, ViewMode};
+use origin::{sync_anchors, FloatingOrigin};
+use pixel_pipeline::{HudBuffer, SceneCamera, COCKPIT_VIEW_H, H, W};
+use sim_core::aircraft::AircraftConfig;
+use sim_core::gear::{Ground, GroundSample, SurfaceType};
+use sim_core::integrator::Simulation;
+use sim_core::{FT, KT};
+use std::sync::Arc;
+use world_gen::climate;
+use world_gen::coords::world_to_latlon;
+use world_gen::World;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Screen {
+    Flight,
+    Map,
+}
+
+/// 把 `world_gen::World` 适配为 sim_core 的地面查询接口（含机场跑道地表）。
+pub struct WorldGround {
+    pub world: Arc<World>,
+    pub day: f64,
+}
+
+impl Ground for WorldGround {
+    fn height(&self, x: f64, z: f64) -> f64 {
+        self.world.height(x, z).max(0.0)
+    }
+
+    fn sample(&self, x: f64, z: f64) -> GroundSample {
+        let h = self.world.height(x, z);
+        if h <= 0.0 {
+            return GroundSample { height: 0.0, normal: glam::DVec3::Y, surface: SurfaceType::Water };
+        }
+        let e = 2.0;
+        let (hx, hz) = (self.world.height(x + e, z), self.world.height(x, z + e));
+        let normal = glam::DVec3::new(-(hx - h) / e, 1.0, -(hz - h) / e).normalize();
+        let mut surface = None;
+        if let Some(ap) = self.world.airport_near(x, z) {
+            let (along, lat) = ap.runway_local(x, z);
+            if along > -15.0 && along < ap.length + 15.0 && lat.abs() <= ap.width / 2.0 + 3.0 {
+                surface = Some(if ap.asphalt { SurfaceType::Asphalt } else { SurfaceType::Dirt });
+            }
+        }
+        let surface = surface.unwrap_or_else(|| {
+            let (lat, _) = world_to_latlon(x, z);
+            if climate::sea_level_temp(lat, self.day, false) - 0.0065 * h < -1.0 {
+                SurfaceType::Snow
+            } else {
+                SurfaceType::Grass
+            }
+        });
+        GroundSample { height: h, normal, surface }
+    }
+}
+
+#[derive(Resource)]
+pub struct GameState {
+    pub sim: Simulation,
+    pub world: Arc<World>,
+    pub day: f64,
+    pub hour: f64,
+    pub view: ViewMode,
+    pub screen: Screen,
+    pub paused: bool,
+    pub airport: usize,
+    pub preset: usize,
+    pub flap_idx: usize,
+    pub time: f64,
+    pub flyby: Option<DVec3>,
+    pub td_played: f64,
+}
+
+impl GameState {
+    pub fn new(seed: u64, icao: Option<&str>, day: f64, hour: f64) -> Self {
+        let world = Arc::new(World::new(seed));
+        let aps = world.airports();
+        let idx = icao
+            .and_then(|c| aps.iter().position(|a| a.icao.eq_ignore_ascii_case(c)))
+            .or_else(|| aps.iter().position(|a| a.kind == world_gen::airport::AirportKind::International && a.lat.abs() < 55.0))
+            .unwrap_or(0);
+        let ap = &aps[idx];
+        let cfg = AircraftConfig::by_code("SKY-172").expect("SKY-172");
+        let sim = Simulation::new(cfg, Box::new(WorldGround { world: world.clone(), day }), (ap.center.0, ap.center.1), ap.heading0);
+        let mut g = Self {
+            sim,
+            world: world.clone(),
+            day,
+            hour,
+            view: ViewMode::Cockpit,
+            screen: Screen::Flight,
+            paused: false,
+            airport: idx,
+            preset: 0,
+            flap_idx: 0,
+            time: 0.0,
+            flyby: None,
+            td_played: 0.0,
+        };
+        g.depart(idx);
+        g
+    }
+
+    /// 从指定机场起飞：停在迎风一端的跑道入口，朝向跑道方向，天气按当前预设。
+    pub fn depart(&mut self, idx: usize) {
+        let ap = self.world.airports()[idx].clone();
+        let (from, _) = climate::prevailing_wind(ap.lat);
+        let diff = |h: f64| ((h - from + 540.0) % 360.0 - 180.0).abs();
+        let end = if diff(ap.heading_of_end(0)) <= diff(ap.heading_of_end(1)) { 0 } else { 1 };
+        let t = ap.ends[end];
+        let (dx, dz) = ap.landing_dir(end);
+        let pos = (t.0 + dx * 14.0, t.1 + dz * 14.0);
+        let cfg = AircraftConfig::by_code("SKY-172").expect("SKY-172");
+        let mut sim = Simulation::new(cfg, Box::new(WorldGround { world: self.world.clone(), day: self.day }), pos, ap.heading_of_end(end));
+        weather_fx::apply_preset(&mut sim, self.preset, ap.lat, self.day, Some(ap.heading_of_end(end)));
+        sim.controls.parking_brake = true;
+        self.sim = sim;
+        self.airport = idx;
+        self.flap_idx = 0;
+        self.flyby = None;
+        self.td_played = 0.0;
+    }
+
+    pub fn respawn(&mut self) {
+        let i = self.airport;
+        self.depart(i);
+    }
+
+    pub fn cycle_weather(&mut self) {
+        self.preset = (self.preset + 1) % weather_fx::PRESET_NAMES.len();
+        let r = self.sim.state.rigid;
+        let (lat, _) = world_to_latlon(r.pos.x, r.pos.z);
+        let hdg = self.sim.diag.heading;
+        weather_fx::apply_preset(&mut self.sim, self.preset, lat, self.day, Some(hdg));
+    }
+}
+
+fn step_sim(mut game: ResMut<GameState>, time: Res<Time>) {
+    if game.screen == Screen::Flight && !game.paused {
+        let dt = time.delta_secs_f64().min(0.1);
+        game.sim.advance(dt);
+        game.time += dt;
+    }
+}
+
+pub fn update_origin(game: Res<GameState>, mut origin: ResMut<FloatingOrigin>) {
+    let p = game.sim.state.rigid.pos;
+    origin.0 = DVec3::new(p.x, p.y, p.z);
+}
+
+fn camera_system(
+    mut game: ResMut<GameState>,
+    origin: Res<FloatingOrigin>,
+    mut cam: Query<(&mut Transform, &mut Camera, &mut Projection), With<SceneCamera>>,
+) {
+    let Ok((mut t, mut camera, mut proj)) = cam.single_mut() else { return };
+    let r = game.sim.state.rigid;
+    let q = Quat::from_xyzw(r.q.x as f32, r.q.y as f32, r.q.z as f32, r.q.w as f32);
+    let (heading, pitch) = (game.sim.diag.heading as f32, game.sim.diag.pitch as f32);
+    let (fov, viewport) = match game.view {
+        ViewMode::Cockpit => (40f32, Some(UVec2::new(W, COCKPIT_VIEW_H))),
+        _ => (50f32, None),
+    };
+    match game.view {
+        ViewMode::Cockpit | ViewMode::Hud => {
+            t.translation = q * Vec3::new(0.0, 0.62, -0.55);
+            t.rotation = q;
+        }
+        ViewMode::Chase => {
+            let yaw = Quat::from_rotation_y(-heading.to_radians());
+            let pit = Quat::from_rotation_x((pitch * 0.4).to_radians());
+            t.translation = yaw * pit * Vec3::new(0.0, 3.5, 15.0);
+            t.look_at(Vec3::new(0.0, 0.6, 0.0), Vec3::Y);
+        }
+        ViewMode::Flyby => {
+            let v = DVec3::new(r.vel.x, r.vel.y, r.vel.z);
+            let ac = DVec3::new(r.pos.x, r.pos.y, r.pos.z);
+            let need = match game.flyby {
+                None => true,
+                Some(a) => (a - ac).length() > 700.0 || (v.length() > 5.0 && (a - ac).dot(v) < -50.0),
+            };
+            if need {
+                let dir = if v.length() > 5.0 { v.normalize() } else { DVec3::NEG_Z };
+                let side = DVec3::new(-dir.z, 0.0, dir.x).normalize_or_zero();
+                let mut a = ac + dir * (v.length().max(30.0) * 5.0) + side * 45.0;
+                let gh = game.world.height(a.x, a.z).max(0.0);
+                a.y = a.y.max(gh + 6.0);
+                game.flyby = Some(a);
+            }
+            let a = game.flyby.unwrap();
+            t.translation = (a - origin.0).as_vec3();
+            t.look_at(Vec3::ZERO, Vec3::Y);
+        }
+    }
+    if let Projection::Perspective(p) = &mut *proj {
+        if (p.fov - fov.to_radians()).abs() > 1e-4 {
+            p.fov = fov.to_radians();
+        }
+    }
+    let want = viewport.map(|s| Viewport { physical_position: UVec2::ZERO, physical_size: s, ..default() });
+    let same = match (&camera.viewport, &want) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.physical_size == b.physical_size,
+        _ => false,
+    };
+    if !same {
+        camera.viewport = want;
+    }
+}
+
+fn hud_system(game: Res<GameState>, mut hud: ResMut<HudBuffer>) {
+    let s = &game.sim;
+    let d = &s.diag;
+    let st = &s.state;
+    let r = &st.rigid;
+    let eng = st.engines.first().copied().unwrap_or_default();
+    // 飞行航迹矢量
+    let vb = r.q.inverse() * r.vel;
+    let fwd = (-vb.z).max(0.1);
+    let fpv = (vb.x.atan2(fwd).to_degrees(), vb.y.atan2(fwd).to_degrees());
+
+    // ILS：最近的带 ILS 机场
+    let mut ils: Option<IlsHud> = None;
+    let mut best = f64::MAX;
+    for ap in game.world.airports().iter().filter(|a| !a.ils.is_empty()) {
+        let dist = world_gen::coords::wrapped_distance(ap.center, (r.pos.x, r.pos.z));
+        if dist > 45_000.0 || dist > best {
+            continue;
+        }
+        let mut pick: Option<(f64, IlsHud)> = None;
+        for i in &ap.ils {
+            let dev = ap.ils_deviation(i, r.pos.x, r.pos.z, r.pos.y);
+            let score = dev.loc_deg.abs() + if dev.loc_valid { 0.0 } else { 1000.0 };
+            if pick.as_ref().map_or(true, |p| score < p.0) {
+                pick = Some((score, IlsHud { ident: i.ident.clone(), loc_deg: dev.loc_deg, gs_deg: dev.gs_deg, loc_valid: dev.loc_valid, gs_valid: dev.gs_valid, dist_km: dev.dist_to_threshold / 1000.0 }));
+            }
+        }
+        if let Some((_, h)) = pick {
+            if h.loc_valid {
+                best = dist;
+                ils = Some(h);
+            }
+        }
+    }
+    let nav_text = game
+        .world
+        .nearest_airport(r.pos.x, r.pos.z)
+        .map(|(a, dist)| format!("{} {:.0}K", a.icao, dist / 1000.0))
+        .unwrap_or_default();
+
+    let dmg = &st.damage;
+    let damage = if dmg.crashed {
+        Some("CRASH".to_string())
+    } else if dmg.left_wing_failed || dmg.right_wing_failed {
+        Some("WING FAILURE".to_string())
+    } else if dmg.gear_collapsed {
+        Some("GEAR COLLAPSED".to_string())
+    } else if dmg.hard_landing {
+        Some("HARD LANDING".to_string())
+    } else if dmg.flaps_jammed.is_some() {
+        Some("FLAPS JAMMED".to_string())
+    } else {
+        None
+    };
+    let precip = s.weather.precip_at(r.pos);
+    let engine_label = match s.config.engines.first().map(|e| e.kind) {
+        Some(sim_core::aircraft::EngineKind::Turbofan { .. }) => "N1",
+        _ => "RPM",
+    };
+    let h = FlightHud {
+        ias_kt: d.ias / KT,
+        ias_failed: false,
+        gs_kt: d.ground_speed / KT,
+        alt_ft: r.pos.y / FT,
+        vs_fpm: d.vertical_speed / FT * 60.0,
+        agl_ft: (d.agl - s.config.rest_cg_height) / FT,
+        heading: d.heading,
+        pitch: d.pitch,
+        roll: d.roll,
+        aoa: d.aoa.to_degrees(),
+        nz: d.nz,
+        throttle: s.controls.throttle,
+        rpm: eng.rpm,
+        fuel_kg: st.fuel_kg,
+        flaps_deg: st.surfaces.flaps * 30.0,
+        gear_down: st.gear_pos > 0.5,
+        trim: s.controls.pitch_trim,
+        brake: s.controls.brake_left > 0.1,
+        parking: s.controls.parking_brake,
+        stall: d.stall_warning,
+        ice: st.ice_load,
+        ovspd: d.warnings.overspeed || d.warnings.flap_overspeed,
+        glim: d.warnings.g_limit,
+        gear_warn: d.warnings.gear_overspeed || (st.gear_pos < 0.5 && d.agl < 150.0 && d.vertical_speed < -1.0),
+        ils,
+        nav_text,
+        fpv,
+        damage,
+        frost: st.ice_load.min(1.0) as f64,
+        rain: if s.weather.precip == sim_core::weather::PrecipKind::Rain { precip } else { 0.0 },
+        time: game.time,
+        code: s.config.code.to_string(),
+        engine_label,
+    };
+    cockpit_ui::draw_flight(&mut hud.0, &h, game.view);
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
+    let seed: u64 = arg("--seed").and_then(|s| s.parse().ok()).unwrap_or(32);
+    let day: f64 = arg("--day").and_then(|s| s.parse().ok()).unwrap_or(120.0);
+    let hour: f64 = arg("--hour").and_then(|s| s.parse().ok()).unwrap_or(10.0);
+    let icao = arg("--icao");
+    let game = GameState::new(seed, icao.as_deref(), day, hour);
+    println!("STRATO-32  seed {seed}  {} airports  start {}", game.world.airports().len(), game.world.airports()[game.airport].icao);
+
+    App::new()
+        .add_plugins(
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window: Some(Window { title: "STRATO-32".into(), resolution: (960, 480).into(), ..default() }),
+                    ..default()
+                })
+                .set(ImagePlugin::default_nearest()),
+        )
+        .add_plugins((
+            pixel_pipeline::PixelPipelinePlugin,
+            origin::OriginPlugin,
+            terrain_mesh::TerrainPlugin,
+            airport_visuals::AirportVisualsPlugin,
+            aircraft_mesh::AircraftMeshPlugin,
+            weather_fx::WeatherFxPlugin,
+            audio::AudioPlugin,
+            map_screen::MapPlugin,
+        ))
+        .insert_resource(game)
+        .insert_resource(HudBuffer(PixelBuffer::new()))
+        .add_systems(
+            Update,
+            (input::read_input, step_sim, update_origin, sync_anchors, camera_system, hud_system.run_if(|g: Res<GameState>| g.screen == Screen::Flight)).chain(),
+        )
+        .run();
+    let _ = (H, W);
+}
+
+---
+
+//! 复古像素航图 / 大地图（按 M 切换）：查看当前星球地形、所有生成机场、选择起飞机场、调整日期（季节）与时间。
+//! 地形图在线程池异步生成（日期变化时重新着色：雪线随季节移动）。
+
+use crate::cockpit_ui::{draw_map, MapMarker, MapView, MAP_H};
+use crate::pixel_pipeline::{HudBuffer, W};
+use crate::{GameState, Screen};
+use bevy::prelude::*;
+use bevy::tasks::futures_lite::future;
+use bevy::tasks::{AsyncComputeTaskPool, Task};
+use world_gen::climate;
+use world_gen::coords::*;
+use world_gen::World;
+
+const MAP_W: usize = W as usize;
+const MONTH_START: [(f64, &str); 12] = [
+    (0.0, "JAN"), (31.0, "FEB"), (59.0, "MAR"), (90.0, "APR"), (120.0, "MAY"), (151.0, "JUN"),
+    (181.0, "JUL"), (212.0, "AUG"), (243.0, "SEP"), (273.0, "OCT"), (304.0, "NOV"), (334.0, "DEC"),
+];
+
+pub fn date_string(day: f64) -> String {
+    let d = day.rem_euclid(365.0);
+    let (start, name) = MONTH_START.iter().rev().find(|(s, _)| d >= *s).copied().unwrap();
+    format!("{} {:02}", name, (d - start) as i32 + 1)
+}
+
+pub fn project(x: f64, z: f64) -> (i32, i32) {
+    let px = ((wrap_x(x) + WORLD_WIDTH / 2.0) / WORLD_WIDTH * MAP_W as f64) as i32;
+    let py = ((clamp_z(z) + WORLD_HEIGHT / 2.0) / WORLD_HEIGHT * MAP_H as f64) as i32;
+    (px.clamp(0, MAP_W as i32 - 1), py.clamp(0, MAP_H - 1))
+}
+
+pub fn unproject(px: i32, py: i32) -> (f64, f64) {
+    (
+        (px as f64 + 0.5) / MAP_W as f64 * WORLD_WIDTH - WORLD_WIDTH / 2.0,
+        (py as f64 + 0.5) / MAP_H as f64 * WORLD_HEIGHT - WORLD_HEIGHT / 2.0,
+    )
+}
+
+/// 生成 320×MAP_H 的 RGB 航图（含山体光影与季节性积雪）。
+pub fn render_map_terrain(world: &World, day: f64) -> Vec<[u8; 3]> {
+    let (w, h) = (MAP_W, MAP_H as usize);
+    let mut hs = vec![0.0f64; w * h];
+    for py in 0..h {
+        for px in 0..w {
+            let (x, z) = unproject(px as i32, py as i32);
+            hs[py * w + px] = world.height(x, z);
+        }
+    }
+    let at = |x: i64, y: i64| hs[(y.clamp(0, h as i64 - 1) as usize) * w + (x.rem_euclid(w as i64) as usize)];
+    let mut out = vec![[0u8; 3]; w * h];
+    for py in 0..h {
+        let (_, lat_z) = unproject(0, py as i32);
+        let (lat, _) = world_to_latlon(0.0, lat_z);
+        for px in 0..w {
+            let (x, z) = unproject(px as i32, py as i32);
+            let hgt = hs[py * w + px];
+            let (dx, dy) = ((at(px as i64 + 1, py as i64) - at(px as i64 - 1, py as i64)), (at(px as i64, py as i64 + 1) - at(px as i64, py as i64 - 1)));
+            let slope = (dx.hypot(dy) / 8000.0).atan();
+            let ocean = hgt <= 0.0;
+            let t_sl = climate::sea_level_temp(lat, day, ocean);
+            let hum = climate::humidity(lat, world.terrain.humidity_noise(x, z));
+            let b = climate::classify(hgt, slope * 3.0, t_sl, hum, climate::snow_line(lat, day));
+            let mut c = climate::biome_color(b);
+            // 山体光影（西北光源）与海深渐变
+            let shade = if ocean { 0.75 + (hgt / 4500.0).max(-1.0) as f32 * 0.35 * -1.0 * -1.0 } else { 1.0 + ((dx - dy) / 2600.0).clamp(-0.45, 0.45) as f32 };
+            for v in &mut c {
+                *v = (*v * shade).clamp(0.0, 1.0);
+            }
+            out[py * w + px] = [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8];
+        }
+    }
+    out
+}
+
+#[derive(Resource)]
+pub struct MapState {
+    cursor: (i32, i32),
+    selected: Option<usize>,
+    terrain: Option<Vec<[u8; 3]>>,
+    terrain_day: f64,
+    task: Option<(f64, Task<Vec<[u8; 3]>>)>,
+    markers: Vec<MapMarker>,
+}
+
+fn setup_map(mut commands: Commands, game: Res<GameState>) {
+    let markers = game
+        .world
+        .airports()
+        .iter()
+        .map(|a| {
+            let (px, py) = project(a.center.0, a.center.1);
+            let kind = match a.kind {
+                world_gen::airport::AirportKind::Dirt => 0,
+                world_gen::airport::AirportKind::Regional => 1,
+                world_gen::airport::AirportKind::International => 2,
+            };
+            MapMarker { px, py, kind }
+        })
+        .collect();
+    let p = game.sim.state.rigid.pos;
+    commands.insert_resource(MapState { cursor: project(p.x, p.z), selected: None, terrain: None, terrain_day: -999.0, task: None, markers });
+}
+
+fn map_system(keys: Res<ButtonInput<KeyCode>>, time: Res<Time>, mut game: ResMut<GameState>, mut map: ResMut<MapState>, mut hud: ResMut<HudBuffer>) {
+    let dt = time.delta_secs();
+    let shift = keys.pressed(KeyCode::ShiftLeft);
+    let speed = if shift { 150.0 } else { 55.0 };
+    let (mut mx, mut my) = (0.0f32, 0.0f32);
+    for (k, dx, dy) in [(KeyCode::ArrowLeft, -1.0, 0.0), (KeyCode::ArrowRight, 1.0, 0.0), (KeyCode::ArrowUp, 0.0, -1.0), (KeyCode::ArrowDown, 0.0, 1.0), (KeyCode::KeyA, -1.0, 0.0), (KeyCode::KeyD, 1.0, 0.0), (KeyCode::KeyW, 0.0, -1.0), (KeyCode::KeyS, 0.0, 1.0)] {
+        if keys.pressed(k) {
+            mx += dx;
+            my += dy;
+        }
+    }
+    let (cx, cy) = (map.cursor.0 as f32 + mx * speed * dt, map.cursor.1 as f32 + my * speed * dt);
+    // 浮点累积：用子像素缓存太复杂，这里以 1 像素步进并限速
+    if mx != 0.0 || my != 0.0 {
+        let step = (speed * dt).max(1.0);
+        let nx = map.cursor.0 as f32 + mx.signum() * if mx != 0.0 { step } else { 0.0 };
+        let ny = map.cursor.1 as f32 + my.signum() * if my != 0.0 { step } else { 0.0 };
+        map.cursor = ((nx as i32).clamp(0, MAP_W as i32 - 1), (ny as i32).clamp(0, MAP_H - 1));
+    }
+    let _ = (cx, cy);
+
+    // 日期 / 时间
+    let day_step = if shift { 30.0 } else { 5.0 };
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        game.day = (game.day - day_step).rem_euclid(365.0);
+    }
+    if keys.just_pressed(KeyCode::BracketRight) {
+        game.day = (game.day + day_step).rem_euclid(365.0);
+    }
+    let hour_step = if shift { 6.0 } else { 1.0 };
+    if keys.just_pressed(KeyCode::Comma) {
+        game.hour = (game.hour - hour_step).rem_euclid(24.0);
+    }
+    if keys.just_pressed(KeyCode::Period) {
+        game.hour = (game.hour + hour_step).rem_euclid(24.0);
+    }
+    if keys.just_pressed(KeyCode::KeyC) {
+        game.cycle_weather();
+    }
+
+    // 选择最近的机场（光标 9 像素内）
+    let cur = map.cursor;
+    map.selected = map
+        .markers
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (i, ((m.px - cur.0).pow(2) + (m.py - cur.1).pow(2)) as f32))
+        .filter(|(_, d)| *d <= 81.0)
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(i, _)| i);
+
+    if keys.just_pressed(KeyCode::Enter) {
+        if let Some(i) = map.selected {
+            game.depart(i);
+            game.screen = Screen::Flight;
+        }
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        game.screen = Screen::Flight;
+    }
+
+    // 异步生成地形图（日期变化 → 重新着色）
+    if let Some((d, task)) = map.task.as_mut() {
+        if let Some(img) = future::block_on(future::poll_once(task)) {
+            let d = *d;
+            map.terrain = Some(img);
+            map.terrain_day = d;
+            map.task = None;
+        }
+    }
+    if map.task.is_none() && (map.terrain_day - game.day).abs() > 0.5 {
+        let world = game.world.clone();
+        let day = game.day;
+        map.task = Some((day, AsyncComputeTaskPool::get().spawn(async move { render_map_terrain(&world, day) })));
+    }
+
+    // 绘制
+    let p = game.sim.state.rigid.pos;
+    let (ax, ay) = project(p.x, p.z);
+    let (_, _, hdg) = (0, 0, game.sim.diag.heading);
+    let ap_line = match map.selected {
+        Some(i) => {
+            let a = &game.world.airports()[i];
+            format!("{} {} RWY {} {:.0}M ELEV {:.0}M{}", a.icao, a.name.to_uppercase(), a.runway_name(), a.length, a.elevation, if a.ils.is_empty() { "" } else { " ILS" })
+        }
+        None => "ARROWS: CURSOR   ENTER: DEPART   M/ESC: BACK".to_string(),
+    };
+    let status0 = format!("{} {:02.0}:00 {} {}", date_string(game.day), game.hour, crate::weather_fx::PRESET_NAMES[game.preset % 6], ap_line.chars().take(0).collect::<String>());
+    let status1 = if map.selected.is_some() { ap_line } else { "[ ] DAY  , . HOUR  C WEATHER  ARROWS CURSOR".to_string() };
+    let view = MapView {
+        terrain: map.terrain.as_deref(),
+        markers: &map.markers,
+        selected: map.selected,
+        cursor: map.cursor,
+        aircraft: Some((ax, ay, hdg)),
+        status: [status0, status1],
+        time: time.elapsed_secs_f64(),
+    };
+    draw_map(&mut hud.0, &view);
+}
+
+pub struct MapPlugin;
+impl Plugin for MapPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(PostStartup, setup_map).add_systems(Update, map_system.run_if(|g: Res<GameState>| g.screen == Screen::Map));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn projection_roundtrip_and_dates() {
+        let (px, py) = project(0.0, 0.0);
+        assert!((px - 160).abs() <= 1 && (py - 70).abs() <= 1);
+        let (x, z) = unproject(px, py);
+        assert_eq!(project(x, z), (px, py));
+        assert_eq!(date_string(0.0), "JAN 01");
+        assert_eq!(date_string(196.0), "JUL 16");
+    }
+}
+
+---
+
+//! 程序化低多边形网格构建器（顶点色 + Flat Shading）。
+
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::prelude::*;
+
+#[derive(Default, Clone)]
+pub struct MeshBuilder {
+    pub pos: Vec<[f32; 3]>,
+    pub nor: Vec<[f32; 3]>,
+    pub col: Vec<[f32; 4]>,
+    pub idx: Vec<u32>,
+}
+
+impl MeshBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 带平面法线的三角形（逆时针为正面）。
+    pub fn tri(&mut self, a: Vec3, b: Vec3, c: Vec3, col: [f32; 4]) {
+        let n = (b - a).cross(c - a).normalize_or_zero();
+        let base = self.pos.len() as u32;
+        for p in [a, b, c] {
+            self.pos.push(p.to_array());
+            self.nor.push(n.to_array());
+            self.col.push(col);
+        }
+        self.idx.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    pub fn tri_cols(&mut self, v: [Vec3; 3], cols: [[f32; 4]; 3]) {
+        let n = (v[1] - v[0]).cross(v[2] - v[0]).normalize_or_zero();
+        let base = self.pos.len() as u32;
+        for i in 0..3 {
+            self.pos.push(v[i].to_array());
+            self.nor.push(n.to_array());
+            self.col.push(cols[i]);
+        }
+        self.idx.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+
+    /// 四边形 a-b-c-d（逆时针）。
+    pub fn quad(&mut self, a: Vec3, b: Vec3, c: Vec3, d: Vec3, col: [f32; 4]) {
+        self.tri(a, b, c, col);
+        self.tri(a, c, d, col);
+    }
+
+    /// 任意旋转的长方体。
+    pub fn cuboid(&mut self, center: Vec3, half: Vec3, rot: Quat, col: [f32; 4]) {
+        let c = |sx: f32, sy: f32, sz: f32| center + rot * Vec3::new(half.x * sx, half.y * sy, half.z * sz);
+        let (p000, p100, p110, p010) = (c(-1., -1., -1.), c(1., -1., -1.), c(1., 1., -1.), c(-1., 1., -1.));
+        let (p001, p101, p111, p011) = (c(-1., -1., 1.), c(1., -1., 1.), c(1., 1., 1.), c(-1., 1., 1.));
+        self.quad(p001, p101, p111, p011, col); // +z
+        self.quad(p100, p000, p010, p110, col); // -z
+        self.quad(p101, p100, p110, p111, col); // +x
+        self.quad(p000, p001, p011, p010, col); // -x
+        self.quad(p011, p111, p110, p010, col); // +y
+        self.quad(p000, p100, p101, p001, col); // -y
+    }
+
+    pub fn aabb(&mut self, center: Vec3, half: Vec3, col: [f32; 4]) {
+        self.cuboid(center, half, Quat::IDENTITY, col);
+    }
+
+    /// 低多边形椭球（八面体细分一次），用于云团。
+    pub fn blob(&mut self, center: Vec3, radii: Vec3, col: [f32; 4]) {
+        let dirs = [Vec3::X, Vec3::NEG_X, Vec3::Y, Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z];
+        let faces = [(0, 2, 4), (4, 2, 1), (1, 2, 5), (5, 2, 0), (4, 3, 0), (1, 3, 4), (5, 3, 1), (0, 3, 5)];
+        for (a, b, c) in faces {
+            let v = |d: Vec3| center + d * radii;
+            let (va, vb, vc) = (dirs[a], dirs[b], dirs[c]);
+            // 每个面再细分为 4
+            let (mab, mbc, mca) = ((va + vb).normalize(), (vb + vc).normalize(), (vc + va).normalize());
+            self.tri(v(va), v(mab), v(mca), col);
+            self.tri(v(mab), v(vb), v(mbc), col);
+            self.tri(v(mca), v(mbc), v(vc), col);
+            self.tri(v(mab), v(mbc), v(mca), col);
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.idx.is_empty()
+    }
+
+    pub fn build(self) -> Mesh {
+        Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, self.pos)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, self.nor)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, self.col)
+            .with_inserted_indices(Indices::U32(self.idx))
+    }
+}
+
+pub fn rgba(c: [f32; 3]) -> [f32; 4] {
+    [c[0], c[1], c[2], 1.0]
+}
+
+---
+
+//! Floating Origin：物理/世界坐标全部为 f64；仅在渲染层减去飞机基准原点后转 f32 提交给 Bevy，
+//! 彻底消除大世界（>100 km）下的浮点抖动。
+
+use bevy::math::DVec3;
+use bevy::prelude::*;
+
+/// 当前渲染原点（f64 世界坐标，等于飞机位置）。
+#[derive(Resource, Default, Clone, Copy)]
+pub struct FloatingOrigin(pub DVec3);
+
+/// 挂在任何“世界固定”实体上：渲染位置 = anchor - origin。
+#[derive(Component, Clone, Copy)]
+pub struct WorldAnchor(pub DVec3);
+
+#[inline]
+pub fn to_render(origin: DVec3, p: DVec3) -> Vec3 {
+    (p - origin).as_vec3()
+}
+
+pub fn sync_anchors(origin: Res<FloatingOrigin>, mut q: Query<(&WorldAnchor, &mut Transform)>) {
+    for (a, mut t) in &mut q {
+        t.translation = to_render(origin.0, a.0);
+    }
+}
+
+pub struct OriginPlugin;
+impl Plugin for OriginPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<FloatingOrigin>();
+    }
+}
+
+
+---
+
+//! 320×160 离屏渲染管线：
+//! 主 3D 摄像机 → 320×160 离屏纹理（`Msaa::Off`），再由全屏后处理材质
+//! 执行 Bayer 4×4 有序抖动 + RGB555 色彩量化，以 Nearest 采样整数倍放大到窗口（黑边信箱，严格 2:1）。
+
+use bevy::asset::{embedded_asset, RenderAssetUsages};
+use bevy::camera::visibility::RenderLayers;
+use bevy::camera::RenderTarget;
+use bevy::image::ImageSampler;
+use bevy::prelude::*;
+use bevy::reflect::TypePath;
+use bevy::render::render_resource::{AsBindGroup, TextureFormat};
+use bevy::shader::ShaderRef;
+use bevy::sprite_render::{Material2d, Material2dPlugin};
+
+pub const W: u32 = 320;
+pub const H: u32 = 160;
+/// 驾驶舱视角下 3D 窗外画面高度（上部 320×112）。
+pub const COCKPIT_VIEW_H: u32 = 112;
+/// 2D 像素合成层的渲染层。
+pub const POST_LAYER: usize = 1;
+
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct PixelPostMaterial {
+    #[texture(0)]
+    #[sampler(1)]
+    pub scene: Handle<Image>,
+    #[texture(2)]
+    #[sampler(3)]
+    pub hud: Handle<Image>,
+}
+
+impl Material2d for PixelPostMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "embedded://app_client/pixel_post.wesl".into()
+    }
+}
+
+#[derive(Resource)]
+pub struct PixelTargets {
+    pub scene: Handle<Image>,
+    pub hud: Handle<Image>,
+}
+
+#[derive(Component)]
+pub struct SceneCamera;
+#[derive(Component)]
+pub struct PostCamera;
+#[derive(Component)]
+pub struct PostQuad;
+
+pub struct PixelPipelinePlugin;
+
+impl Plugin for PixelPipelinePlugin {
+    fn build(&self, app: &mut App) {
+        embedded_asset!(app, "pixel_post.wesl");
+        app.add_plugins(Material2dPlugin::<PixelPostMaterial>::default())
+            .add_systems(Startup, setup_pipeline)
+            .add_systems(Update, (fit_quad_to_window, upload_hud));
+    }
+}
+
+fn nearest(mut img: Image) -> Image {
+    img.sampler = ImageSampler::nearest();
+    img
+}
+
+fn setup_pipeline(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<PixelPostMaterial>>,
+) {
+    // 3D 离屏目标（320×160；RGBA8，sRGB 视图写入）
+    let scene = nearest(Image::new_target_texture(W, H, TextureFormat::Rgba8Unorm, Some(TextureFormat::Rgba8UnormSrgb)));
+    let scene = images.add(scene);
+
+    // 2D 像素仪表层（CPU 缓冲，原生 320×160，透明）
+    let hud = nearest(Image::new_fill(
+        bevy::render::render_resource::Extent3d { width: W, height: H, depth_or_array_layers: 1 },
+        bevy::render::render_resource::TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    ));
+    let hud = images.add(hud);
+
+    // 3D 主摄像机：渲染到离屏纹理，Msaa 关闭
+    commands.spawn((
+        Camera3d::default(),
+        Camera { order: -1, clear_color: ClearColorConfig::Custom(Color::srgb(0.45, 0.65, 0.9)), ..default() },
+        RenderTarget::Image(scene.clone().into()),
+        Msaa::Off,
+        Projection::Perspective(PerspectiveProjection { fov: 50f32.to_radians(), near: 0.3, far: 900_000.0, ..default() }),
+        Transform::default(),
+        SceneCamera,
+    ));
+
+    // 全屏后处理四边形 + 2D 摄像机（独立渲染层）
+    let layer = RenderLayers::layer(POST_LAYER);
+    commands.spawn((Camera2d, Camera { order: 0, clear_color: ClearColorConfig::Custom(Color::BLACK), ..default() }, Msaa::Off, layer.clone(), PostCamera));
+    commands.spawn((
+        Mesh2d(meshes.add(Rectangle::new(1.0, 1.0))),
+        MeshMaterial2d(materials.add(PixelPostMaterial { scene: scene.clone(), hud: hud.clone() })),
+        Transform::from_scale(Vec3::new(W as f32 * 3.0, H as f32 * 3.0, 1.0)),
+        layer,
+        PostQuad,
+    ));
+    commands.insert_resource(PixelTargets { scene, hud });
+}
+
+/// 整数倍缩放：窗口物理像素 / (320×160) 向下取整，剩余区域为黑边（严格 2:1）。
+fn fit_quad_to_window(windows: Query<&Window>, mut quad: Query<&mut Transform, With<PostQuad>>) {
+    let (Ok(win), Ok(mut tf)) = (windows.single(), quad.single_mut()) else { return };
+    let (pw, ph) = (win.physical_width().max(1), win.physical_height().max(1));
+    let s = (pw / W).min(ph / H).max(1) as f32;
+    let sf = win.scale_factor().max(0.1);
+    tf.scale = Vec3::new(W as f32 * s / sf, H as f32 * s / sf, 1.0);
+}
+
+/// 把 CPU 像素缓冲上传到 GPU。
+#[derive(Resource)]
+pub struct HudBuffer(pub crate::cockpit_ui::PixelBuffer);
+
+fn upload_hud(buf: Option<Res<HudBuffer>>, targets: Option<Res<PixelTargets>>, mut images: ResMut<Assets<Image>>) {
+    let (Some(buf), Some(t)) = (buf, targets) else { return };
+    if let Some(img) = images.get_mut(&t.hud) {
+        img.data = Some(buf.0.data.clone());
+    }
+}
+
+---
+
+import bevy_sprite_render::mesh2d::vertex_output::VertexOutput;
+
+// 3D 场景（320x160 离屏纹理，sRGB 编码值）与 2D 像素仪表层（Rgba8Unorm）
+@group(constants::MATERIAL_BIND_GROUP) @binding(0) var scene_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(1) var scene_samp: sampler;
+@group(constants::MATERIAL_BIND_GROUP) @binding(2) var hud_tex: texture_2d<f32>;
+@group(constants::MATERIAL_BIND_GROUP) @binding(3) var hud_samp: sampler;
+
+// 4x4 Bayer 有序抖动矩阵（0..15）
+fn bayer4(p: vec2<i32>) -> f32 {
+    var m = array<f32, 16>(
+        0.0, 8.0, 2.0, 10.0,
+        12.0, 4.0, 14.0, 6.0,
+        3.0, 11.0, 1.0, 9.0,
+        15.0, 7.0, 13.0, 5.0
+    );
+    let x = p.x & 3;
+    let y = p.y & 3;
+    return (m[y * 4 + x] + 0.5) / 16.0;
+}
+
+@fragment
+fn fragment(mesh: VertexOutput) -> @location(0) vec4<f32> {
+    let uv = mesh.uv;
+    let scene = textureSample(scene_tex, scene_samp, uv).rgb;
+    let hud = textureSample(hud_tex, hud_samp, uv);
+    // HUD 层叠加（alpha=0 处透出 3D 画面）
+    var c = mix(scene, hud.rgb, hud.a);
+    // 色彩量化：RGB555（每通道 32 级）+ Bayer 4x4 抖动
+    let px = vec2<i32>(floor(uv * vec2<f32>(320.0, 160.0)));
+    let t = bayer4(px);
+    let levels = 31.0;
+    c = floor(c * levels + t) / levels;
+    // 显示面板为 sRGB 输出：把 sRGB 编码值还原为线性
+    return vec4<f32>(pow(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2)), 1.0);
+}
+
+
+---
+
+//! 多级 LOD 地形 Chunk 异步生成与卸载（AsyncComputeTaskPool）。
+//! 地形采样使用 f64 世界坐标；Chunk 顶点相对 Chunk 中心（f32），实体位置由 Floating Origin 同步。
+
+use crate::mesh_util::MeshBuilder;
+use crate::origin::WorldAnchor;
+use crate::GameState;
+use bevy::math::DVec3;
+use bevy::prelude::*;
+use bevy::tasks::futures_lite::future;
+use bevy::tasks::{AsyncComputeTaskPool, Task};
+use std::collections::HashMap;
+use std::sync::Arc;
+use world_gen::climate;
+use world_gen::coords::world_to_latlon;
+use world_gen::World;
+
+/// 每级 LOD 的 Chunk 边长（m）与每边网格数。
+pub const LOD_SIZE: [f64; 4] = [1_200.0, 4_800.0, 19_200.0, 76_800.0];
+pub const CELLS: i32 = 24;
+const RADIUS: i64 = 3;
+/// 低 LOD 下沉（m），避免与高 LOD 重叠处 Z 冲突。
+const LOD_BIAS: [f32; 4] = [0.0, -4.0, -18.0, -70.0];
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ChunkKey {
+    pub lod: u8,
+    pub cx: i64,
+    pub cz: i64,
+}
+
+impl ChunkKey {
+    pub fn center(&self) -> (f64, f64) {
+        let s = LOD_SIZE[self.lod as usize];
+        ((self.cx as f64 + 0.5) * s, (self.cz as f64 + 0.5) * s)
+    }
+}
+
+#[derive(Component)]
+pub struct TerrainChunk(pub ChunkKey);
+
+#[derive(Resource, Default)]
+pub struct ChunkManager {
+    pub loaded: HashMap<ChunkKey, Entity>,
+    pub pending: HashMap<ChunkKey, Task<MeshBuilder>>,
+    pub day_built: f64,
+}
+
+#[derive(Resource)]
+pub struct TerrainMaterial(pub Handle<StandardMaterial>);
+
+/// 生成一个 Chunk 的网格数据（纯函数，可在线程池运行）。
+pub fn build_chunk(world: &World, day: f64, key: ChunkKey) -> MeshBuilder {
+    let size = LOD_SIZE[key.lod as usize];
+    let step = size / CELLS as f64;
+    let (xc, zc) = key.center();
+    let (x0, z0) = (xc - size / 2.0, zc - size / 2.0);
+    let n = (CELLS + 3) as usize; // 含 1 圈边界用于坡度
+    let mut hs = vec![0.0f64; n * n];
+    for j in 0..n {
+        for i in 0..n {
+            hs[j * n + i] = world.height(x0 + (i as f64 - 1.0) * step, z0 + (j as f64 - 1.0) * step);
+        }
+    }
+    let at = |i: i32, j: i32| hs[((j + 1) as usize) * n + (i + 1) as usize];
+    let verts = (CELLS + 1) as usize;
+    let mut pos = vec![Vec3::ZERO; verts * verts];
+    let mut col = vec![[0.0f32; 4]; verts * verts];
+    let bias = LOD_BIAS[key.lod as usize];
+    for j in 0..=CELLS {
+        for i in 0..=CELLS {
+            let h = at(i, j);
+            let dx = (at(i + 1, j) - at(i - 1, j)) / (2.0 * step);
+            let dz = (at(i, j + 1) - at(i, j - 1)) / (2.0 * step);
+            let slope = dx.hypot(dz).atan();
+            let (wx, wz) = (x0 + i as f64 * step, z0 + j as f64 * step);
+            let (lat, _) = world_to_latlon(wx, wz);
+            let ocean = h <= 0.0;
+            let t_sl = climate::sea_level_temp(lat, day, ocean);
+            let hum = climate::humidity(lat, world.terrain.humidity_noise(wx, wz));
+            let b = climate::classify(h, slope, t_sl, hum, climate::snow_line(lat, day));
+            let mut c = climate::biome_color(b);
+            // 基于高度的细微明暗，增强低模层次感
+            let shade = 1.0 + ((h * 0.004).sin() as f32) * 0.05;
+            for v in &mut c {
+                *v = (*v * shade).clamp(0.0, 1.0);
+            }
+            let y = if ocean { 0.0 } else { h } as f32 + bias;
+            pos[(j as usize) * verts + i as usize] = Vec3::new((i as f64 * step - size / 2.0) as f32, y, (j as f64 * step - size / 2.0) as f32);
+            col[(j as usize) * verts + i as usize] = [c[0], c[1], c[2], 1.0];
+        }
+    }
+    let mut mb = MeshBuilder::new();
+    let skirt = 40.0 * (key.lod as f32 + 1.0);
+    for j in 0..CELLS as usize {
+        for i in 0..CELLS as usize {
+            let idx = |a: usize, b: usize| b * verts + a;
+            let (p00, p10, p01, p11) = (idx(i, j), idx(i + 1, j), idx(i, j + 1), idx(i + 1, j + 1));
+            // 朝上的绕序：(x,z) 平面内 p00 → p01 → p10
+            let avg = |a: usize, b: usize, c: usize| {
+                let (ca, cb, cc) = (col[a], col[b], col[c]);
+                [(ca[0] + cb[0] + cc[0]) / 3.0, (ca[1] + cb[1] + cc[1]) / 3.0, (ca[2] + cb[2] + cc[2]) / 3.0, 1.0]
+            };
+            mb.tri(pos[p00], pos[p01], pos[p10], avg(p00, p01, p10));
+            mb.tri(pos[p10], pos[p01], pos[p11], avg(p10, p01, p11));
+        }
+    }
+    // 裙边：向下延伸，遮住不同 LOD 之间的裂缝
+    let mut edge = |a: usize, b: usize, flip: bool| {
+        let (pa, pb) = (pos[a], pos[b]);
+        let (da, db) = (pa - Vec3::Y * skirt, pb - Vec3::Y * skirt);
+        let c = col[a];
+        if flip {
+            mb.quad(pa, pb, db, da, c);
+        } else {
+            mb.quad(pb, pa, da, db, c);
+        }
+    };
+    let idx = |a: usize, b: usize| b * verts + a;
+    for i in 0..CELLS as usize {
+        edge(idx(i, 0), idx(i + 1, 0), false);
+        edge(idx(i, CELLS as usize), idx(i + 1, CELLS as usize), true);
+        edge(idx(0, i), idx(0, i + 1), true);
+        edge(idx(CELLS as usize, i), idx(CELLS as usize, i + 1), false);
+    }
+    mb
+}
+
+/// 每帧：决定需要的 Chunk、发起异步任务、收取结果、卸载远处 Chunk。
+pub fn stream_chunks(
+    mut commands: Commands,
+    game: Res<GameState>,
+    mut mgr: ResMut<ChunkManager>,
+    mat: Option<Res<TerrainMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let Some(mat) = mat else { return };
+    let r = &game.sim.state.rigid;
+    let (ax, az) = (r.pos.x, r.pos.z);
+
+    // 日期变化（积雪线移动）→ 全部重建
+    if (game.day - mgr.day_built).abs() >= 3.0 {
+        let ents: Vec<Entity> = mgr.loaded.drain().map(|(_, e)| e).collect();
+        for e in ents {
+            commands.entity(e).despawn();
+        }
+        mgr.pending.clear();
+        mgr.day_built = game.day;
+    }
+
+    // 需要的集合（高 LOD 覆盖区域内的低 LOD Chunk 被跳过）
+    let mut wanted: Vec<ChunkKey> = Vec::new();
+    for lod in 0..4usize {
+        let s = LOD_SIZE[lod];
+        let (acx, acz) = ((ax / s).floor() as i64, (az / s).floor() as i64);
+        for dz in -RADIUS..=RADIUS {
+            for dx in -RADIUS..=RADIUS {
+                let key = ChunkKey { lod: lod as u8, cx: acx + dx, cz: acz + dz };
+                if lod > 0 {
+                    let ps = LOD_SIZE[lod - 1];
+                    let (pcx, pcz) = ((ax / ps).floor() as i64, (az / ps).floor() as i64);
+                    let (min_x, max_x) = ((pcx - RADIUS) as f64 * ps, (pcx + RADIUS + 1) as f64 * ps);
+                    let (min_z, max_z) = ((pcz - RADIUS) as f64 * ps, (pcz + RADIUS + 1) as f64 * ps);
+                    let (kx0, kz0) = (key.cx as f64 * s, key.cz as f64 * s);
+                    if kx0 >= min_x && kx0 + s <= max_x && kz0 >= min_z && kz0 + s <= max_z {
+                        continue;
+                    }
+                }
+                wanted.push(key);
+            }
+        }
+    }
+    // 近处优先
+    wanted.sort_by(|a, b| {
+        let da = (a.center().0 - ax).hypot(a.center().1 - az);
+        let db = (b.center().0 - ax).hypot(b.center().1 - az);
+        da.partial_cmp(&db).unwrap()
+    });
+    let wanted_set: std::collections::HashSet<ChunkKey> = wanted.iter().copied().collect();
+
+    // 卸载
+    let stale: Vec<ChunkKey> = mgr.loaded.keys().filter(|k| !wanted_set.contains(k)).copied().collect();
+    for k in stale {
+        if let Some(e) = mgr.loaded.remove(&k) {
+            commands.entity(e).despawn();
+        }
+    }
+    mgr.pending.retain(|k, _| wanted_set.contains(k));
+
+    // 收取完成的任务
+    let done: Vec<ChunkKey> = mgr.pending.keys().copied().collect();
+    for k in done {
+        let finished = {
+            let task = mgr.pending.get_mut(&k).unwrap();
+            future::block_on(future::poll_once(task))
+        };
+        if let Some(mb) = finished {
+            mgr.pending.remove(&k);
+            let (xc, zc) = k.center();
+            let e = commands
+                .spawn((
+                    Mesh3d(meshes.add(mb.build())),
+                    MeshMaterial3d(mat.0.clone()),
+                    Transform::default(),
+                    WorldAnchor(DVec3::new(xc, 0.0, zc)),
+                    TerrainChunk(k),
+                ))
+                .id();
+            mgr.loaded.insert(k, e);
+        }
+    }
+
+    // 发起新任务（每帧最多 8 个，避免线程池拥塞）
+    let pool = AsyncComputeTaskPool::get();
+    let mut started = 0;
+    for k in wanted {
+        if started >= 8 || mgr.pending.len() >= 24 {
+            break;
+        }
+        if mgr.loaded.contains_key(&k) || mgr.pending.contains_key(&k) {
+            continue;
+        }
+        let world: Arc<World> = game.world.clone();
+        let day = game.day;
+        mgr.pending.insert(k, pool.spawn(async move { build_chunk(&world, day, k) }));
+        started += 1;
+    }
+}
+
+pub fn setup_terrain_material(mut commands: Commands, mut mats: ResMut<Assets<StandardMaterial>>) {
+    let h = mats.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 1.0, reflectance: 0.05, metallic: 0.0, ..default() });
+    commands.insert_resource(TerrainMaterial(h));
+}
+
+pub struct TerrainPlugin;
+impl Plugin for TerrainPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ChunkManager>().add_systems(Startup, setup_terrain_material).add_systems(Update, stream_chunks);
+    }
+}
+
+
+---
+
+//! 天气与环境视觉：动态雾（能见度）、多层低模云、3D 雨雪粒子、太阳/天空/环境光。
+
+use crate::mesh_util::MeshBuilder;
+use crate::origin::{FloatingOrigin, WorldAnchor};
+use crate::pixel_pipeline::SceneCamera;
+use crate::GameState;
+use bevy::math::DVec3;
+use bevy::pbr::{DistanceFog, FogFalloff};
+use bevy::prelude::*;
+use sim_core::integrator::Simulation;
+use sim_core::weather::{CloudLayer, PrecipKind, ShearLayer};
+use std::collections::HashMap;
+use world_gen::climate;
+
+pub const PRESET_NAMES: [&str; 6] = ["CLEAR", "RAIN", "SNOW", "FOG", "ICING", "STORM"];
+
+/// 应用天气预设。`runway_heading` 用于让风与跑道对齐/形成侧风。
+pub fn apply_preset(sim: &mut Simulation, preset: usize, lat: f64, day: f64, runway_heading: Option<f64>) {
+    let w = &mut sim.weather;
+    *w = sim_core::weather::WeatherState::calm();
+    w.seed = 1 + preset as u32 * 7;
+    let base_delta = climate::isa_delta_t(lat, day, false);
+    w.atmosphere.delta_t = base_delta;
+    let (prev_from, prev_speed) = climate::prevailing_wind(lat);
+    let from = runway_heading.unwrap_or(prev_from);
+    match preset % PRESET_NAMES.len() {
+        0 => {
+            w.set_surface_wind(from, prev_speed.min(6.0));
+            w.set_wind_aloft(prev_from, prev_speed * 2.5);
+            w.turbulence = 0.15;
+        }
+        1 => {
+            w.set_surface_wind(from, 8.0);
+            w.set_wind_aloft(prev_from, 18.0);
+            w.gust = 4.0;
+            w.turbulence = 0.4;
+            w.clouds.push(CloudLayer { base: 600.0, top: 3500.0, coverage: 1.0 });
+            w.precip = PrecipKind::Rain;
+            w.precip_intensity = 0.6;
+            w.fog_visibility = 6000.0;
+            w.atmosphere.delta_t = base_delta.max(-6.0).min(8.0);
+        }
+        2 => {
+            w.set_surface_wind(from, 6.0);
+            w.set_wind_aloft(prev_from, 14.0);
+            w.turbulence = 0.3;
+            w.clouds.push(CloudLayer { base: 500.0, top: 3000.0, coverage: 1.0 });
+            w.precip = PrecipKind::Snow;
+            w.precip_intensity = 0.7;
+            w.fog_visibility = 2500.0;
+            w.atmosphere.delta_t = base_delta.min(-16.0);
+        }
+        3 => {
+            w.set_surface_wind(from, 2.0);
+            w.fog_visibility = 350.0;
+        }
+        4 => {
+            w.set_surface_wind(from, 5.0);
+            w.set_wind_aloft(prev_from, 12.0);
+            w.turbulence = 0.3;
+            w.clouds.push(CloudLayer { base: 1200.0, top: 4500.0, coverage: 1.0 });
+            w.atmosphere.delta_t = -10.0;
+        }
+        _ => {
+            // 侧风风暴：与跑道成 70° 夹角
+            let cross = (from + 70.0).rem_euclid(360.0);
+            w.set_surface_wind(cross, 14.0);
+            w.set_wind_aloft(cross, 24.0);
+            w.gust = 8.0;
+            w.turbulence = 0.8;
+            w.clouds.push(CloudLayer { base: 1500.0, top: 3500.0, coverage: 0.6 });
+            w.shear_layers.push(ShearLayer { altitude: 300.0 + 0.0, thickness: 120.0, delta: DVec3::new(6.0, 0.0, 6.0).to_array().into() });
+            w.fog_visibility = 9000.0;
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+pub struct WeatherFx {
+    sig: u64,
+    clouds: HashMap<(i32, i32, i32), Entity>,
+}
+
+#[derive(Resource)]
+pub struct FxAssets {
+    cloud_mesh: Handle<Mesh>,
+    cloud_mat: Handle<StandardMaterial>,
+    rain_mesh: Handle<Mesh>,
+    snow_mesh: Handle<Mesh>,
+    rain_mat: Handle<StandardMaterial>,
+    snow_mat: Handle<StandardMaterial>,
+}
+
+#[derive(Component)]
+pub struct Particle {
+    off: Vec3,
+}
+#[derive(Component)]
+pub struct Cloud;
+
+const N_PARTICLES: usize = 170;
+const BOX: Vec3 = Vec3::new(20.0, 12.0, 20.0);
+
+fn rnd(seed: u32) -> f32 {
+    let mut x = seed.wrapping_mul(747796405).wrapping_add(2891336453);
+    x = ((x >> ((x >> 28) + 4)) ^ x).wrapping_mul(277803737);
+    ((x >> 22) ^ x) as f32 / u32::MAX as f32
+}
+
+fn setup_fx(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut mats: ResMut<Assets<StandardMaterial>>) {
+    let mut cb = MeshBuilder::new();
+    cb.blob(Vec3::ZERO, Vec3::ONE, [0.96, 0.96, 0.98, 1.0]);
+    let cloud_mesh = meshes.add(cb.build());
+    let cloud_mat = mats.add(StandardMaterial { base_color: Color::WHITE, perceptual_roughness: 1.0, reflectance: 0.0, ..default() });
+    let rain_mesh = meshes.add(Cuboid::new(0.025, 0.025, 0.9));
+    let snow_mesh = meshes.add(Cuboid::new(0.09, 0.09, 0.09));
+    let rain_mat = mats.add(StandardMaterial { base_color: Color::srgb(0.7, 0.8, 1.0), unlit: true, ..default() });
+    let snow_mat = mats.add(StandardMaterial { base_color: Color::WHITE, unlit: true, ..default() });
+    for i in 0..N_PARTICLES {
+        let off = Vec3::new((rnd(i as u32 * 3) * 2.0 - 1.0) * BOX.x, (rnd(i as u32 * 3 + 1) * 2.0 - 1.0) * BOX.y, (rnd(i as u32 * 3 + 2) * 2.0 - 1.0) * BOX.z);
+        commands.spawn((Mesh3d(rain_mesh.clone()), MeshMaterial3d(rain_mat.clone()), Transform::from_translation(off), Visibility::Hidden, Particle { off }));
+    }
+    commands.insert_resource(FxAssets { cloud_mesh, cloud_mat, rain_mesh, snow_mesh, rain_mat, snow_mat });
+    commands.insert_resource(WeatherFx::default());
+}
+
+fn weather_signature(sim: &Simulation) -> u64 {
+    let w = &sim.weather;
+    let mut h = w.seed as u64;
+    for c in &w.clouds {
+        h = h.wrapping_mul(31).wrapping_add(c.base as u64 * 7 + c.top as u64 + (c.coverage * 100.0) as u64);
+    }
+    h
+}
+
+fn manage_clouds(mut commands: Commands, game: Res<GameState>, assets: Option<Res<FxAssets>>, mut fx: ResMut<WeatherFx>, mut tick: Local<f32>, time: Res<Time>) {
+    let Some(assets) = assets else { return };
+    *tick -= time.delta_secs();
+    let sig = weather_signature(&game.sim);
+    if sig != fx.sig {
+        for (_, e) in fx.clouds.drain() {
+            commands.entity(e).despawn();
+        }
+        fx.sig = sig;
+        *tick = 0.0;
+    }
+    if *tick > 0.0 {
+        return;
+    }
+    *tick = 0.5;
+    let ac = game.sim.state.rigid.pos;
+    let cs = 2400.0;
+    let (ci, cj) = ((ac.x / cs).floor() as i32, (ac.z / cs).floor() as i32);
+    let far: Vec<(i32, i32, i32)> = fx.clouds.keys().copied().filter(|k| (k.1 - ci).abs() > 8 || (k.2 - cj).abs() > 8).collect();
+    for k in far {
+        if let Some(e) = fx.clouds.remove(&k) {
+            commands.entity(e).despawn();
+        }
+    }
+    for (li, layer) in game.sim.weather.clouds.iter().enumerate() {
+        let mid = 0.5 * (layer.base + layer.top);
+        for dj in -6..=6 {
+            for di in -6..=6 {
+                let key = (li as i32, ci + di, cj + dj);
+                if fx.clouds.contains_key(&key) {
+                    continue;
+                }
+                let seed = (key.1.wrapping_mul(73856093) ^ key.2.wrapping_mul(19349663) ^ key.0.wrapping_mul(83492791)) as u32;
+                let jx = (rnd(seed) - 0.5) * cs * 0.7;
+                let jz = (rnd(seed ^ 0x55) - 0.5) * cs * 0.7;
+                let pos = DVec3::new((key.1 as f64 + 0.5) * cs + jx as f64, mid, (key.2 as f64 + 0.5) * cs + jz as f64);
+                if game.sim.weather.cloud_density(bevy_to_glam(pos)) < 0.25 {
+                    continue;
+                }
+                let thick = ((layer.top - layer.base) * 0.42).clamp(60.0, 420.0) as f32;
+                let r = cs as f32 * (0.5 + 0.35 * rnd(seed ^ 0x99));
+                let e = commands
+                    .spawn((
+                        Mesh3d(assets.cloud_mesh.clone()),
+                        MeshMaterial3d(assets.cloud_mat.clone()),
+                        Transform::from_scale(Vec3::new(r, thick, r)).with_rotation(Quat::from_rotation_y(rnd(seed ^ 0x77) * 6.28)),
+                        WorldAnchor(DVec3::new(pos.x, layer.base + thick as f64 * 0.7, pos.z)),
+                        Cloud,
+                    ))
+                    .id();
+                fx.clouds.insert(key, e);
+            }
+        }
+    }
+}
+
+fn bevy_to_glam(v: DVec3) -> sim_core_glam::DVec3 {
+    sim_core_glam::DVec3::new(v.x, v.y, v.z)
+}
+mod sim_core_glam {
+    pub use glam::DVec3;
+}
+
+/// 雨/雪粒子：相对机体坐标系内循环，运动方向 = 机体相对空气的反向 + 下落速度。
+fn update_particles(
+    game: Res<GameState>,
+    time: Res<Time>,
+    assets: Option<Res<FxAssets>>,
+    cam: Query<&Transform, (With<SceneCamera>, Without<Particle>)>,
+    mut q: Query<(&mut Particle, &mut Transform, &mut Visibility, &mut Mesh3d, &mut MeshMaterial3d<StandardMaterial>)>,
+) {
+    let Some(assets) = assets else { return };
+    let Ok(ct) = cam.single() else { return };
+    let w = &game.sim.weather;
+    let p = game.sim.state.rigid.pos;
+    let intensity = w.precip_at(sim_core_glam::DVec3::new(p.x, p.y, p.z));
+    let snow = w.precip == PrecipKind::Snow;
+    let v = game.sim.state.rigid.vel;
+    let wind = game.sim.diag.wind;
+    let fall = if snow { 1.5 } else { 9.0 };
+    let rel = Vec3::new((wind.x - v.x) as f32, (wind.y - v.y) as f32 - fall, (wind.z - v.z) as f32);
+    let dt = time.delta_secs();
+    let active = ((intensity.clamp(0.0, 1.0) * N_PARTICLES as f64) as usize).min(N_PARTICLES);
+    for (i, (mut part, mut t, mut vis, mut mesh, mut mat)) in q.iter_mut().enumerate() {
+        if intensity <= 0.0 || i >= active || game.view == crate::cockpit_ui::ViewMode::Chase && false {
+            *vis = Visibility::Hidden;
+            continue;
+        }
+        *vis = Visibility::Visible;
+        mesh.0 = if snow { assets.snow_mesh.clone() } else { assets.rain_mesh.clone() };
+        mat.0 = if snow { assets.snow_mat.clone() } else { assets.rain_mat.clone() };
+        part.off += rel * dt;
+        // 回绕到盒内
+        for (a, b) in [(0, BOX.x), (1, BOX.y), (2, BOX.z)] {
+            let o = part.off[a];
+            if o > b {
+                part.off[a] = o - 2.0 * b;
+            } else if o < -b {
+                part.off[a] = o + 2.0 * b;
+            }
+        }
+        t.translation = ct.translation + part.off;
+        if !snow && rel.length() > 0.1 {
+            t.rotation = Quat::from_rotation_arc(Vec3::Z, rel.normalize());
+        }
+    }
+}
+
+/// 太阳方向（指向太阳的单位向量，世界系：X 东 / Y 上 / Z 南）。
+pub fn sun_dir(lat_deg: f64, day: f64, hour: f64) -> Vec3 {
+    let decl = climate::solar_declination(day).to_radians();
+    let phi = lat_deg.to_radians();
+    let ha = ((hour - 12.0) * 15.0).to_radians();
+    let sin_el = phi.sin() * decl.sin() + phi.cos() * decl.cos() * ha.cos();
+    let east = -decl.cos() * ha.sin();
+    let north = decl.sin() * phi.cos() - decl.cos() * phi.sin() * ha.cos();
+    Vec3::new(east as f32, sin_el as f32, -north as f32).normalize()
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+}
+
+/// 每帧更新：太阳光、天空色、环境光、距离雾（随能见度）。
+pub fn update_environment(
+    mut commands: Commands,
+    game: Res<GameState>,
+    mut sun: Query<(&mut Transform, &mut DirectionalLight)>,
+    mut cam: Query<(Entity, &mut Camera), With<SceneCamera>>,
+    mut ambient: ResMut<GlobalAmbientLight>,
+    origin: Res<FloatingOrigin>,
+) {
+    let _ = origin;
+    let r = &game.sim.state.rigid;
+    let (lat, _) = world_gen::coords::world_to_latlon(r.pos.x, r.pos.z);
+    let sd = sun_dir(lat, game.day, game.hour);
+    let day_f = ((sd.y + 0.12) / 0.4).clamp(0.0, 1.0);
+    let overcast = game.sim.weather.clouds.iter().any(|c| c.coverage > 0.9) as i32 as f32;
+    let vis = game.sim.diag.visibility.max(50.0) as f32;
+    let haze = (1.0 - vis / 25_000.0).clamp(0.0, 1.0);
+    let gray_amt = (overcast * 0.65).max(haze * 0.85);
+    let (night, dayc, grayc) = ([0.01, 0.015, 0.04], [0.45, 0.66, 0.93], [0.62, 0.64, 0.68]);
+    let mut sky = lerp3(night, dayc, day_f);
+    // 晨昏暖色
+    let dusk = (1.0 - (sd.y.abs() / 0.18).min(1.0)) * 0.5;
+    sky = lerp3(sky, [0.95, 0.5, 0.25], dusk * (1.0 - overcast * 0.6));
+    let gray = lerp3([0.01, 0.012, 0.02], grayc, day_f);
+    let fog_col = lerp3(sky, gray, gray_amt);
+    let clear = lerp3(sky, gray, overcast * 0.7);
+    if let Ok((mut t, mut l)) = sun.single_mut() {
+        *t = Transform::default().looking_to(-sd, Vec3::Y);
+        l.illuminance = 300.0 + 11_000.0 * sd.y.max(0.0).sqrt() * (1.0 - 0.55 * overcast);
+        l.color = Color::srgb(1.0, 0.95 - dusk * 0.2, 0.88 - dusk * 0.35);
+    }
+    ambient.brightness = 60.0 + 900.0 * day_f * (1.0 - 0.3 * overcast);
+    ambient.color = Color::srgb(0.75 + 0.1 * (1.0 - day_f), 0.8, 1.0);
+    if let Ok((e, mut cam)) = cam.single_mut() {
+        cam.clear_color = ClearColorConfig::Custom(Color::srgb(clear[0], clear[1], clear[2]));
+        commands.entity(e).insert(DistanceFog {
+            color: Color::srgb(fog_col[0], fog_col[1], fog_col[2]),
+            falloff: FogFalloff::ExponentialSquared { density: 1.9 / vis },
+            ..default()
+        });
+    }
+}
+
+pub fn setup_sun(mut commands: Commands) {
+    commands.spawn((DirectionalLight { illuminance: 10_000.0, shadows_enabled: false, ..default() }, Transform::default().looking_to(Vec3::new(-0.3, -1.0, -0.4), Vec3::Y)));
+}
+
+pub struct WeatherFxPlugin;
+impl Plugin for WeatherFxPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, (setup_fx, setup_sun)).add_systems(Update, (manage_clouds, update_particles, update_environment));
+    }
+}
+
+
+----
+
+filename（按照上面粘贴的文件顺序）
+
+* `aircraft_mesh.rs`
+
+
+* `airport_visuals.rs`
+
+
+* `audio.rs`
+
+
+* `cockpit_ui.rs`
+
+
+* `input.rs`
+
+
+* `main.rs`
+
+
+* `map_screen.rs`
+
+
+* `mesh_util.rs`
+
+
+* `origin.rs`
+
+
+* `pixel_pipeline.rs`
+
+
+* `pixel_post.wesl`
+
+
+* `terrain_mesh.rs`
+
+
+* `weather_fx.rs`
