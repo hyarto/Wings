@@ -220,11 +220,14 @@ pub fn evaluate(cfg: &AircraftConfig, rs: &RigidState, ground: &dyn Ground, inp:
             let wd = if is_float { c.water_drag } else { WHEEL_WATER_DRAG };
             let depth = compression.min(c.travel.max(0.3) * 2.0);
             let visc = 2500.0;
-            let kx = (0.5 * RHO_WATER * vx.abs() + visc) * wd * depth;
+            // 滑水：超过“驼峰速度”后船体抬升，兴波阻力随速度下降，同时产生动态升力
+            let plane = 1.0 / (1.0 + (vx.abs() / 15.0).powi(2));
+            let kx = (0.5 * RHO_WATER * vx.abs() * plane + visc) * wd * depth;
             let ky = (0.5 * RHO_WATER * vy.abs() + visc) * wd * depth * 6.0;
             let fx = -kx * vx;
             let fy = -ky * vy;
-            let force_w = n * nf + f * fx + right * fy;
+            let dyn_lift = if is_float { 0.5 * RHO_WATER * vx * vx * wd * 0.40 * (compression / 0.15).min(1.0) } else { 0.0 };
+            let force_w = n * (nf + dyn_lift) + f * fx + right * fy;
             out.force += qi * force_w;
             out.moment += qi * r_w.cross(force_w);
             out.total_normal += nf;

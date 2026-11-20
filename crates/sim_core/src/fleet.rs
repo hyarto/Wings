@@ -88,6 +88,7 @@ fn airframe(l: &Layout) -> Vec<SurfaceConfig> {
         };
         s.flap_cd = if inner { l.flap_cd } else { 0.0 };
         s.spoiler_cd = l.spoiler_cd;
+        s.flap_stall_frac = 0.17;
         s.slipstream = if inner { l.slip_inner } else { 0.0 };
         s
     };
@@ -232,14 +233,14 @@ pub fn twin6() -> AircraftConfig {
         alpha0_deg: -1.5,
         stall_in_deg: 15.0,
         stall_out_deg: 17.5,
-        cd0: 0.0115,
+        cd0: 0.013,
         oswald: 0.80,
         cm0: -0.05,
         inner_share: 0.66,
         inner_x_frac: 0.15,
         outer_x_frac: 0.38,
-        aileron: 0.16,
-        flap_gain: 0.60,
+        aileron: 0.065,
+        flap_gain: 0.38,
         flap_cd: 0.12,
         flap_cm: -0.12,
         spoiler_gain: 0.0,
@@ -249,7 +250,7 @@ pub fn twin6() -> AircraftConfig {
         h_y: 3.2,
         h_z: 7.6,
         h_cl_alpha: 3.6,
-        h_incidence_deg: -2.5,
+        h_incidence_deg: -5.3,
         h_ar: 4.2,
         elevator: 0.34,
         h_slip: 0.15,
@@ -260,7 +261,7 @@ pub fn twin6() -> AircraftConfig {
         v_ar: 1.6,
         rudder: 0.45,
         v_slip: 0.25,
-        body_cda: DVec3::new(7.0, 12.0, 0.95),
+        body_cda: DVec3::new(7.0, 12.0, 1.5),
     };
     let main = |side: f64| {
         wheel(
@@ -273,7 +274,7 @@ pub fn twin6() -> AircraftConfig {
             0.32,
             0.0,
             if side < 0.0 { BrakeGroup::Left } else { BrakeGroup::Right },
-            0.85,
+            0.55,
             false,
         )
     };
@@ -288,6 +289,7 @@ pub fn twin6() -> AircraftConfig {
             prop_pitch_speed: 165.0,
             static_thrust: 9_200.0,
             reverse_ratio: 0.55,
+            lapse_exp: 1.15,
         },
         pos: DVec3::new(side * 3.7, 1.0, -1.9),
         spin: 1.0,
@@ -356,14 +358,14 @@ pub fn jet39() -> AircraftConfig {
         alpha0_deg: -1.0,
         stall_in_deg: 16.5,
         stall_out_deg: 18.5,
-        cd0: 0.0105,
+        cd0: 0.0125,
         oswald: 0.80,
         cm0: -0.03,
         inner_share: 0.55,
         inner_x_frac: 0.14,
         outer_x_frac: 0.38,
-        aileron: 0.075,
-        flap_gain: 0.40,
+        aileron: 0.07,
+        flap_gain: 0.36,
         flap_cd: 0.10,
         flap_cm: -0.08,
         spoiler_gain: 0.0,
@@ -373,7 +375,7 @@ pub fn jet39() -> AircraftConfig {
         h_y: 0.9,
         h_z: 5.3,
         h_cl_alpha: 3.4,
-        h_incidence_deg: -2.0,
+        h_incidence_deg: -1.6,
         h_ar: 3.2,
         elevator: 0.42,
         h_slip: 0.0,
@@ -397,7 +399,7 @@ pub fn jet39() -> AircraftConfig {
             0.30,
             0.0,
             if side < 0.0 { BrakeGroup::Left } else { BrakeGroup::Right },
-            0.7,
+            0.45,
             true,
         )
     };
@@ -416,7 +418,7 @@ pub fn jet39() -> AircraftConfig {
         mean_chord: l.chord,
         surfaces: airframe(&l),
         engines: vec![EngineConfig {
-            kind: EngineKind::Turbofan { thrust_n: 16_870.0, tsfc: 2.1e-5, bypass_decay: 0.45, reverse_ratio: 0.0 },
+            kind: EngineKind::Turbofan { thrust_n: 17_200.0, tsfc: 2.1e-5, bypass_decay: 0.40, reverse_ratio: 0.0, lapse_exp: 1.0 },
             pos: DVec3::new(0.0, 0.0, 1.2),
             spin: 0.0,
             prop_diameter: 0.0,
@@ -444,7 +446,7 @@ pub fn jet39() -> AircraftConfig {
         has_pitot_heat: true,
         max_ice_mass: 60.0,
         v_rotate: 100.0 * KT,
-        v_best_climb: 270.0 * KT,
+        v_best_climb: 220.0 * KT,
         v_approach: 112.0 * KT,
         control_rate: 5.0,
         gear_time: 6.0,
@@ -478,8 +480,8 @@ pub fn liner73() -> AircraftConfig {
         inner_share: 0.66,
         inner_x_frac: 0.15,
         outer_x_frac: 0.36,
-        aileron: 0.12,
-        flap_gain: 0.42,
+        aileron: 0.045,
+        flap_gain: 0.44,
         flap_cd: 0.13,
         flap_cm: -0.12,
         spoiler_gain: -0.06,
@@ -489,7 +491,7 @@ pub fn liner73() -> AircraftConfig {
         h_y: 1.8,
         h_z: 15.5,
         h_cl_alpha: 3.9,
-        h_incidence_deg: -2.0,
+        h_incidence_deg: -4.9,
         h_ar: 4.8,
         elevator: 0.36,
         h_slip: 0.0,
@@ -521,7 +523,7 @@ pub fn liner73() -> AircraftConfig {
     let weight = (32_000.0 + 11_000.0 + 0.7 * 15_000.0) * G;
     let cg_h = rest_height(&main(1.0), 2.0, weight);
     let engine = |side: f64| EngineConfig {
-        kind: EngineKind::Turbofan { thrust_n: 88_800.0, tsfc: 1.7e-5, bypass_decay: 0.55, reverse_ratio: 0.45 },
+        kind: EngineKind::Turbofan { thrust_n: 88_800.0, tsfc: 1.7e-5, bypass_decay: 0.46, reverse_ratio: 0.45, lapse_exp: 0.85 },
         pos: DVec3::new(side * 5.0, -1.4, -3.0),
         spin: 0.0,
         prop_diameter: 0.0,
@@ -595,8 +597,8 @@ pub fn sea415() -> AircraftConfig {
         inner_share: 0.62,
         inner_x_frac: 0.17,
         outer_x_frac: 0.38,
-        aileron: 0.14,
-        flap_gain: 0.50,
+        aileron: 0.06,
+        flap_gain: 0.40,
         flap_cd: 0.12,
         flap_cm: -0.12,
         spoiler_gain: 0.0,
@@ -606,7 +608,7 @@ pub fn sea415() -> AircraftConfig {
         h_y: 4.2,
         h_z: 10.0,
         h_cl_alpha: 3.6,
-        h_incidence_deg: -2.0,
+        h_incidence_deg: -5.2,
         h_ar: 4.0,
         elevator: 0.34,
         h_slip: 0.1,
@@ -630,7 +632,7 @@ pub fn sea415() -> AircraftConfig {
             0.45,
             0.0,
             if side < 0.0 { BrakeGroup::Left } else { BrakeGroup::Right },
-            0.6,
+            0.4,
             true,
         )
     };
@@ -645,6 +647,7 @@ pub fn sea415() -> AircraftConfig {
             prop_pitch_speed: 170.0,
             static_thrust: 25_000.0,
             reverse_ratio: 0.5,
+            lapse_exp: 0.9,
         },
         pos: DVec3::new(side * 5.2, 2.3, -2.2),
         spin: 1.0,

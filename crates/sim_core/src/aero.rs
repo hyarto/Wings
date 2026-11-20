@@ -67,6 +67,11 @@ pub fn wave_drag(mach: f64, mach_crit: f64) -> f64 {
     100.0 * d * d * d
 }
 
+/// 有效临界马赫数：升力系数越大（高空低速大迎角），抖振起始马赫越低。
+pub fn effective_mach_crit(mach_crit: f64, cl: f64) -> f64 {
+    mach_crit - 0.10 * (cl - 0.3).max(0.0)
+}
+
 /// 马赫抖振：高马赫下临界迎角提前（rad）。与低速失速共同构成“棺材角”。
 pub fn mach_stall_shift(mach: f64, mach_crit: f64) -> f64 {
     0.9 * (mach - (mach_crit + 0.02)).max(0.0)
@@ -111,8 +116,11 @@ pub fn section_m(
 ) -> Section {
     let ice = (ice * s.ice_sensitivity).clamp(0.0, 1.0);
     let dstall = 5f64.to_radians() * ice;
-    let a_pos = (s.alpha_stall_pos - 0.5 * delta - dstall - mach_shift).max(0.05);
-    let a_neg = (s.alpha_stall_neg - 0.5 * delta + dstall + mach_shift).min(-0.05);
+    // 襟翼增升以 flap_stall_frac 提前失速，其余舵面偏转按 0.5
+    let d_flap = flap * s.gains.flap;
+    let stall_shift = 0.5 * (delta - d_flap) + s.flap_stall_frac * d_flap;
+    let a_pos = (s.alpha_stall_pos - stall_shift - dstall - mach_shift).max(0.05);
+    let a_neg = (s.alpha_stall_neg - stall_shift + dstall + mach_shift).min(-0.05);
 
     // 结冰使 CLmax 最多下降 40%：综合“失速角提前”与“斜率缩放”两个效应
     let f_ice = 1.0 - 0.40 * ice;
@@ -222,8 +230,13 @@ pub fn compute(cfg: &AircraftConfig, rs: &RigidState, inp: &AeroInputs, out: &mu
 
             let (induced_mult, boost) = if s.kind.is_wing() { (phi, slope_boost) } else { (1.0, 0.0) };
             let mach = speed / inp.sound_speed.max(1.0);
-            let (m_shift, m_wave) = if mach > cfg.mach_crit - 0.1 {
-                (mach_stall_shift(mach, cfg.mach_crit), wave_drag(mach, cfg.mach_crit))
+            let mcrit = if s.kind.is_wing() {
+                effective_mach_crit(cfg.mach_crit, (s.cl_alpha * (alpha + delta - s.alpha0)).max(0.0))
+            } else {
+                cfg.mach_crit
+            };
+            let (m_shift, m_wave) = if mach > mcrit - 0.1 {
+                (mach_stall_shift(mach, mcrit), wave_drag(mach, mcrit))
             } else {
                 (0.0, 0.0)
             };

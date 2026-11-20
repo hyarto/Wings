@@ -96,9 +96,9 @@ pub fn update(
                 slipstream: slipstream(t.max(0.0), v, atm.density, disc_area),
             };
         }
-        EngineKind::Turboprop { power_w, bsfc, max_rpm, prop_pitch_speed, static_thrust, reverse_ratio } => {
-            let p_alt = sigma.powf(0.8);
-            let thr_eff = 0.08 + 0.92 * st.throttle;
+        EngineKind::Turboprop { power_w, bsfc, max_rpm, prop_pitch_speed, static_thrust, reverse_ratio, lapse_exp } => {
+            let p_alt = sigma.powf(lapse_exp);
+            let thr_eff = 0.04 + 0.96 * st.throttle;
             let p = if running { power_w * thr_eff * p_alt } else { 0.0 };
             let mut t = prop_thrust(p, power_w, v, sigma, prop_pitch_speed, static_thrust);
             if reverse && running {
@@ -120,10 +120,10 @@ pub fn update(
                 slipstream: slipstream(t.max(0.0), v, atm.density, disc_area),
             };
         }
-        EngineKind::Turbofan { thrust_n, tsfc, bypass_decay, reverse_ratio } => {
+        EngineKind::Turbofan { thrust_n, tsfc, bypass_decay, reverse_ratio, lapse_exp } => {
             let mach = v / atm.speed_of_sound;
             let thr_eff = 0.05 + 0.95 * st.throttle;
-            let lapse = sigma.powf(0.85) * (1.0 - bypass_decay * mach).max(0.2);
+            let lapse = sigma.powf(lapse_exp) * (1.0 - bypass_decay * mach).max(0.2);
             let mut t = if running { thrust_n * thr_eff.powf(1.15) * lapse } else { 0.0 };
             if reverse && running && v > 8.0 {
                 t = -reverse_ratio * thrust_n * thr_eff.powf(1.15) * lapse;
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn turbofan_reverse_thrust_is_negative() {
         let cfg = EngineConfig {
-            kind: EngineKind::Turbofan { thrust_n: 60_000.0, tsfc: 1.6e-5, bypass_decay: 0.4, reverse_ratio: 0.4 },
+            kind: EngineKind::Turbofan { thrust_n: 60_000.0, tsfc: 1.6e-5, bypass_decay: 0.4, reverse_ratio: 0.4, lapse_exp: 0.85 },
             pos: glam::DVec3::ZERO,
             spin: 0.0,
             prop_diameter: 0.0,

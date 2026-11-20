@@ -72,6 +72,8 @@ pub struct SurfaceConfig {
     pub ice_sensitivity: f64,
     /// 仅 Fuselage 使用：沿机体 X/Y/Z 轴的 Cd·A（m²）。
     pub body_cda: DVec3,
+    /// 襟翼偏转使临界迎角提前的比例（偏转量 × 比例；经典值 0.5，现代增升装置更小）。
+    pub flap_stall_frac: f64,
 }
 
 impl SurfaceConfig {
@@ -100,6 +102,7 @@ impl SurfaceConfig {
             downwash: 0.0,
             ice_sensitivity: 1.0,
             body_cda: DVec3::ZERO,
+            flap_stall_frac: 0.5,
         }
     }
 }
@@ -109,9 +112,9 @@ pub enum EngineKind {
     /// 活塞螺旋桨（额定功率 W）。
     Piston { power_w: f64, bsfc: f64, max_rpm: f64, idle_rpm: f64, prop_pitch_speed: f64, static_thrust: f64 },
     /// 涡桨（轴功率 W，含反桨能力）。
-    Turboprop { power_w: f64, bsfc: f64, max_rpm: f64, prop_pitch_speed: f64, static_thrust: f64, reverse_ratio: f64 },
+    Turboprop { power_w: f64, bsfc: f64, max_rpm: f64, prop_pitch_speed: f64, static_thrust: f64, reverse_ratio: f64, lapse_exp: f64 },
     /// 涡扇（海平面静推力 N）。
-    Turbofan { thrust_n: f64, tsfc: f64, bypass_decay: f64, reverse_ratio: f64 },
+    Turbofan { thrust_n: f64, tsfc: f64, bypass_decay: f64, reverse_ratio: f64, lapse_exp: f64 },
 }
 
 #[derive(Clone, Copy, Debug)]
