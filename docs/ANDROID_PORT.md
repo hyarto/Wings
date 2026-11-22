@@ -7,7 +7,7 @@
 | 评估项 | 实现 |
 | --- | --- |
 | A1 工程结构 | `app_client` 拆为 `lib.rs`（`cdylib`+`rlib`，`#[bevy_main] pub fn main`）+ 薄 `main.rs`（桌面入口不变）。`android-game-activity` feature 只在 `cfg(target_os="android")` 下启用，桌面构建不受影响 |
-| A1 Android 外壳 | `android/`：Gradle 8.6 + AGP 8.4 + `androidx.games:games-activity:2.0.2`，`MainActivity extends GameActivity`（沉浸式、常亮、刘海 `shortEdges`、`sensorLandscape`），`minSdk 28 / targetSdk 34`，仅 `arm64-v8a` |
+| A1 Android 外壳 | `android/`：Gradle 8.6 + AGP 8.4 + `androidx.games:games-activity:4.4.0`，`MainActivity extends GameActivity`（沉浸式、常亮、刘海 `shortEdges`、`sensorLandscape`），`minSdk 28 / targetSdk 34`，仅 `arm64-v8a` |
 | A2 触控 UI | `crates/app_client/src/touch_ui.rs`：向 `ButtonInput<KeyCode>` 注入按键，`read_input` / `menu_system` / `map_system` 逻辑未改；模拟量（摇杆、油门）经 `TouchAxes` 并入 `read_input`（+14 行） |
 | A3 菜单/航图触控 | 开始菜单：直接点行选中、点值区左半/右半 = 减/加、点 `FLY!` 行出发；航图：浮动摇杆平移光标 + 方向键/日期/时间/天气按钮 |
 | A3 生命周期 | 切后台（`AppLifecycle::Suspended`）自动暂停并暂停所有音频；回前台恢复音频，飞行保持暂停由玩家点 PAUSE 继续 |
@@ -43,6 +43,21 @@ android/build.sh        # JOBS=2 ./android/build.sh 可降低内存占用
 ```
 
 构建实测（4 核 / 4 GB，`--profile android` = release + strip）：Rust 首次 ≈ 10 分钟；`libapp_client.so` 68 MB（strip），APK 29 MB。
+
+## 版本约束（闪退 SIGABRT 的教训）
+
+`android-activity`（Rust 侧，**静态链入** `libapp_client.so` 的 GameActivity C/C++ 层）与 Gradle 的
+`androidx.games:games-activity`（Java 层）**必须同一版本**。两端通过 `RegisterNatives` 绑定 24 个 JNI 方法，
+签名不一致时 SDK 会直接 `abort()`（现象：进 `onCreate` 即 SIGABRT 闪退，无 Java 异常对话框）。
+
+| android-activity | games-activity AAR |
+| --- | --- |
+| 0.6.x（当前 0.6.1） | **4.4.0**（兼容 4.0.0） |
+
+首版曾误用 `2.0.2`：Java 端 `onTouchEventNative (JLandroid/view/MotionEvent;)Z`，native 端
+`(JLandroid/view/MotionEvent;IIIIIJJIIIIIIFF)Z` → `NoSuchMethodError` → abort。已改为 4.4.0，
+并在 `android/build.sh` 末尾加入 `android/verify_abi.sh`，自动比对 APK 里 dex 与 `.so` 的签名，不一致则构建失败。
+升级 `android-activity` 时请同步升级 AAR 并重新跑 `build.sh`。
 
 ## 已验证 / 未验证
 
