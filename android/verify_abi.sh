@@ -14,7 +14,7 @@ NATIVE="$(strings -a "$T/lib/arm64-v8a/libapp_client.so" | grep -E '^\(JLandroid
 # Java 端：dex 里 GameActivity.onTouchEventNative 的方法原型
 DEXDUMP="$(ls "${ANDROID_HOME:?}"/build-tools/*/dexdump | tail -1)"
 JAVA="$("$DEXDUMP" -d "$T"/classes*.dex 2>/dev/null \
-  | awk '/Class descriptor.*Lcom\/google\/androidgamesdk\/GameActivity;/{c=1} c&&/name +: .onTouchEventNative./{n=1} n&&/type +:/{print; exit}' \
+  | awk '/Class descriptor.*Lcom\/google\/androidgamesdk\/GameActivity;/{c=1} c&&/name +: .onTouchEventNative./{n=1} n&&!d&&/type +:/{print; d=1}' \
   | sed -E "s/.*type +: '(.*)'.*/\1/")"
 
 echo "native: ${NATIVE:-<none>}"
