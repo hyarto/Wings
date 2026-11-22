@@ -54,5 +54,9 @@ android {
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.games:games-activity:2.0.2'
+    // !! 必须与 Rust 侧 android-activity 内置（静态链入 libapp_client.so）的 GameActivity C 层同一版本，
+    // 否则 onTouchEventNative 的 JNI 签名对不上 → RegisterNatives 失败 → abort()（SIGABRT 闪退）。
+    // android-activity 0.6.x <=> games-activity 4.4.0（向下兼容 4.0.0）。升级 android-activity 时同步修改；
+    // android/verify_abi.sh 会在打包后校验两端签名一致。
+    implementation 'androidx.games:games-activity:4.4.0'
 }

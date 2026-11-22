@@ -16,3 +16,5 @@ cd android
 [ -f local.properties ] || echo "sdk.dir=${ANDROID_HOME:?请设置 ANDROID_HOME}" > local.properties
 ./gradlew --no-daemon assembleRelease
 ls -la app/build/outputs/apk/release/
+# 4) 校验 Java/native GameActivity JNI 签名一致（防止版本错配导致启动即 SIGABRT）
+bash ./verify_abi.sh
